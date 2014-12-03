@@ -257,7 +257,7 @@ int symbol_table_iter_deref( struct symbol_table* tb , int idx, void** data , co
 static
 int symbol_table_iter_start( struct symbol_table* tb , void** data , const char** name ) {
     if( tb->sz == 0 )
-        return tb->cap;
+        return tb->cap+1;
     return symbol_table_iter_deref(tb,0,data,name);
 }
 
@@ -272,7 +272,7 @@ int symbol_table_iter_deref( struct symbol_table* tb , int idx, void** data , co
     for( ; symbol_table_entry(tb,idx)->mem == NULL && cast(size_t,idx) < (tb->cap) ; ++idx );
     *data = symbol_table_entry(tb,idx)->mem;
     *name = symbol_table_entry(tb,idx)->key;
-    return idx+1;
+    return idx == (tb->cap)-1 ? idx = (tb->cap)+1 : idx+1;
 }
 
 /* =============================
@@ -904,6 +904,7 @@ int invoke_user_func( struct pure* f , struct pure_user_func* ufunc , const stru
     int ret;
     struct pure_value* par_val[PURE_MAX_FUNC_PAR];
     struct symbol_table* stk;
+    struct pure_user_func* prev_func = f->cur_result->cur_ufunc;
 
     assert(f->cur_result);
 
@@ -947,7 +948,7 @@ int invoke_user_func( struct pure* f , struct pure_user_func* ufunc , const stru
 
     /* Move back PC to the callee */
     set_pc(f,pc);
-    f->cur_result->cur_ufunc = NULL;
+    f->cur_result->cur_ufunc = prev_func;
     return ret;
 }
 
@@ -1078,7 +1079,7 @@ int64_t to_int( double val ) {
 }
 
 static
-int obj_idx_ref( struct pure* f , const char var[PURE_MAX_VARNAME] , struct pure_value** val ) {
+int obj_idx_ref( struct pure* f , const char var[PURE_MAX_VARNAME] , struct pure_value** val , struct pure_array** arr_obj ) {
     struct pure_value obj;
     struct pure_value idx_val;
     size_t idx;
@@ -1089,6 +1090,8 @@ int obj_idx_ref( struct pure* f , const char var[PURE_MAX_VARNAME] , struct pure
     pure_value_invalid(&obj);
 
     lookup_var(f,var,&obj);
+    if( arr_obj )
+        *arr_obj = NULL;
 
     if( obj.type == PURE_ARRAY ) {
         next_tk(f,1);
@@ -1111,6 +1114,8 @@ int obj_idx_ref( struct pure* f , const char var[PURE_MAX_VARNAME] , struct pure
         if( pure_array_index(&(shared_value(&obj)->value.arr),idx,val) != 0 ) {
             *val = NULL;
         }
+        if( arr_obj ) 
+            *arr_obj = &(shared_value(&obj)->value.arr);
         unref_val(f,&obj);
         return 0;
     } else if( obj.type == PURE_MAP ) {
@@ -1143,7 +1148,7 @@ static
 int obj_idx( struct pure* f , const char var[PURE_MAX_VARNAME] , struct pure_value* val ) {
     struct pure_value* tar;
     assert(f->tk == TK_LSQR);
-    if( obj_idx_ref(f,var,&tar) !=0 )
+    if( obj_idx_ref(f,var,&tar,NULL) !=0 )
         return -1;
     else {
         if( tar != NULL )
@@ -1710,6 +1715,7 @@ int assign_or_call_fn( struct pure* f ) {
     int offset;
     struct pure_value val;
     struct pure_value* idx;
+    struct pure_array* arr;
 
     pure_value_invalid(&val);
     
@@ -1727,7 +1733,7 @@ int assign_or_call_fn( struct pure* f ) {
             unref_val(f,&val);
         goto done;
     case TK_LSQR: /* We allow indexer as left hand side value */
-        ret = obj_idx_ref(f,var,&idx);
+        ret = obj_idx_ref(f,var,&idx,&arr);
         if( ret != 0 ) {
             goto done;
         } else if( idx == NULL ) {
@@ -1743,9 +1749,22 @@ int assign_or_call_fn( struct pure* f ) {
         if( (ret=rhs_val(f,&val)) !=0) {
             goto done;
         }
-        /* What we really do here is _REPLACE_ that value*/
-        ref_val(f,idx,&val);
-        unref_val(f,&val);
+
+        /* For map and array , if we assign the nil value, 
+         * we have different semantics here, a map can get 
+         * a nil value to indicate that slot is empty, however
+         * array cannot. So we need to remove that slot in the
+         * array when user assign nil to the slot of array */
+        
+        if( arr != NULL && val.type == PURE_NIL ) {
+            /* we just need to remove that array entry here */
+            int i = idx - (arr->arr);
+            pure_array_remove(f,arr,i);
+        } else {
+            /* do normal reference and dereference */
+            ref_val(f,idx,&val);
+            unref_val(f,&val);
+        }
         break;
     case TK_ASSIGN: /* Typical assignment, starts with a variable */
         next_tk(f,1);
@@ -3938,6 +3957,17 @@ void test_1() {
         pure_reg_func(p,"dump",dump_cb,NULL);
         assert( pure_run_str(p,str,&err,&ec,&line,&pos) == 0 );
     }
+    {
+        int ec,line,pos;
+        const char* err;
+        /* empty function definition */
+        char str[] = \
+            "arr=[1,2,3,4];arr[3]=nil;func print_arr(arr){for(k,arr){print(k);}}print_arr(arr);print(size(arr));";
+        struct pure* p = pure_create();
+        pure_reg_func(p,"print",printf_cb,NULL);
+        assert( pure_run_str(p,str,&err,&ec,&line,&pos) == 0 );
+        err = NULL;
+    }
 }
 
 void test_2() {
@@ -4000,6 +4030,7 @@ int main() {
     test_map_index();
     test_array_foreach();
     test_map_foreach();
+    test_1();
     test_2(); 
     printf("-------------------------Unit test finish!--------------------\n");
     return 0;
