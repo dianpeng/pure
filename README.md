@@ -24,7 +24,7 @@ for different program to describe its configuration data.
 
 7) Automatic garbage collection by reference count
 
-8) Small library size (with -Os , gcc generates a 28KB library)
+8) Small library size (with -Os , gcc generates a 33KB library)
 
 
 # Sample
