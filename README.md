@@ -22,7 +22,7 @@ for different program to describe its configuration data.
 # Sample
 
 ## Array
->>>
+```
 # Test if the input value is a number or not
 func IsOdd(num) {
 	if( num % 2 == 0 ) 
@@ -52,15 +52,15 @@ func PrintArray(arr) {
 # Main
 OddArr = FilterOutOdd([1,2,3,4,5,6,7,8,9,10]);
 PrintArray(OddArr);
-<<<
+```
 ## Map
->>>
+```
 SimpleMap = {"Key1":"Value1","Key2":"Value2","Key3":1234,"Key4":[1,2,3,4,5]};
 print(SimpleMap["Key1"]);
 print(SimpleMap["Key2"]);
 SimpleMap["Key2"] = nil;
 print(SimpleMap["Key2"]);
-<<<
+```
 
 # Performance
 Pure implements a _ONE_ pass lexing/parsing/interpreting phase. This is OK for configuration, because user just 
