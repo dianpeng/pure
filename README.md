@@ -71,7 +71,7 @@ print(SimpleMap["Key2"]);
 ```
 
 # Performance
-Pure implements a _ONE_ pass lexing/parsing/interpreting phase. This is OK for configuration, because user just 
+Pure implements a _ONE_ pass lexing/parsing/interpretation phase. This is OK for configuration, because user just 
 need to grab the final value for each item inside of the configuration. However, Pure is _NOT_ a good candidate for general 
 script, especially some part of the code will be executed multiple times. A Fibonacci recursive implementation in Pure will be
 _HUNDREDS_ times slower than a native implementation in C. However, if the execution flow is just one time pass , then Pure's speed
