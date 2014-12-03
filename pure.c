@@ -32,8 +32,7 @@ extern "C" {
 enum {
     PURE_EC_NO_ERROR,
     PURE_EC_NO_SUCH_FUNC,
-    PURE_EC_FUNC_EXEC_ERROR,
-    PURE_EC_NO_SUCH_VARIABLE,
+    PURE_EC_FUNCTION_EXECUTION_ERROR,
     PURE_EC_UNKNOWN_CONSTANT_SYMBOL,
     PURE_EC_UNKNOWN_UNARY_OPRAND,
     PURE_EC_ONLY_NUMBER_CAN_BE_FACTOR,
@@ -52,6 +51,7 @@ enum {
     PURE_EC_FUNCTION_REDEFINE,
     PURE_EC_TOO_MANY_FUNCTION_PARAMETERS,
     PURE_EC_EXPECT_SEMICON,
+    PURE_EC_UNKNOWN_LEFT_HANDSIDE_VALUE,
     PURE_EC_INDEX_ON_NON_ARRAY_OR_MAP,
     PURE_EC_ARRAY_INDEX_SHOULD_BE_INTEGER,
     PURE_EC_MAP_INDEX_SHOULD_BE_STRING,
@@ -262,7 +262,7 @@ int symbol_table_iter_start( struct symbol_table* tb , void** data , const char*
 
 static
 int symbol_table_iter_has_next( struct symbol_table* tb , int idx ) {
-    return idx < tb->cap;
+    return idx < cast(int,tb->cap);
 }
 
 static
@@ -452,7 +452,7 @@ void ref_val( struct pure* f , struct pure_value* lhs , const struct pure_value*
         ++(shared_value(rhs)->ref_cnt);
         lhs->value.shared_val = rhs->value.shared_val;
         return;
-    default: assert(0); return;
+    default: return;
     }
 }
 
@@ -467,7 +467,7 @@ int to_boolean( const struct pure_value* val ) {
         return val->value.num != 0 ? 1 : 0;
     case PURE_NIL:
         return 0;
-    default: assert(0); return 0;
+    default: return 0;
     }
 }
 
@@ -527,13 +527,14 @@ struct pure {
     const char* data; /* data */
     size_t loc; /* current location */
     int ec;
+    char ex_err_str[1024];
     struct pure_result* cur_result;
 };
 
 enum {
     TK_EOF,TK_STR,TK_NUM,TK_VAR,TK_ASSIGN,TK_EQ,TK_NEQ,TK_LT,TK_LET,TK_GT,TK_GET,
     TK_NOT,TK_OR,TK_AND,TK_LBRA,TK_RBRA,TK_LSQR,TK_RSQR,TK_LPAR,TK_RPAR,TK_SEMICON,
-    TK_ADD,TK_SUB,TK_MUL,TK_DIV,TK_NIL,TK_BREAK,TK_COLON,
+    TK_ADD,TK_SUB,TK_MUL,TK_DIV,TK_MOD,TK_NIL,TK_BREAK,TK_COLON,
     TK_COMMA,TK_IF,TK_ELIF,TK_ELSE,TK_FOR,TK_LOOP,TK_FUNC,TK_RET,TK_UNKNOWN,TK_COMMENT
 };
 
@@ -602,6 +603,27 @@ void pure_array_push_back( struct pure* f , struct pure_array* i , const struct 
 }
 
 static
+void pure_array_remove( struct pure* f, struct pure_array* i , int index ) {
+    struct pure_value* new_slot;
+
+    if( index >= cast(int,i->sz) )
+        return;
+    new_slot = malloc( (i->cap-1)*sizeof(struct pure_value) );
+    if( index > 0 ) {
+        memcpy(new_slot,i->arr,sizeof(struct pure_array)*index);
+    }
+    if( index < cast(int,(i->sz-1)) ) {
+        memcpy(new_slot+sizeof(struct pure_array)*index
+            ,i->arr+sizeof(struct pure_array)*(index+1),
+            sizeof(struct pure_array)*(i->sz-index-1));
+    }
+    unref_val(f,i->arr+index);
+    i->sz--;
+    free(i->arr);
+    i->arr = new_slot;
+}
+
+static
 struct pure_array* pure_array_fit( struct pure_array* i ) {
     struct pure_value* val = malloc(i->sz*sizeof(struct pure_value));
     memcpy(val,i->arr,sizeof(struct pure_value)*i->sz);
@@ -620,14 +642,6 @@ void pure_array_delete( struct pure* f , struct pure_array* arr ) {
     free(arr->arr);
     arr->cap = 0;
     arr->arr = NULL;
-}
-
-static
-struct pure_value* pure_array_index_safe( struct pure_array* arr , int index ) {
-    if( index >= 0 && cast(size_t,index) < arr->sz )
-        return arr->arr + index;
-    else
-        return NULL;
 }
 
 static
@@ -660,7 +674,7 @@ void unref_val( struct pure* f , struct pure_value* v ) {
                 v->type = PURE_INVALID;
                 free_shared_value(f,v->value.shared_val);
                 break;
-            default: assert(0);
+            default: break;
             }
         }
     }
@@ -688,6 +702,7 @@ int next_tk( struct pure* f , int offset ) {
         case '-' : return (f->tk = TK_SUB);
         case '*' : return (f->tk = TK_MUL);
         case '/' : return (f->tk = TK_DIV);
+        case '%' : return (f->tk = TK_MOD);
         case ';' : return (f->tk = TK_SEMICON);
         case ':' : return (f->tk = TK_COLON);
         case '=' : 
@@ -896,7 +911,7 @@ int invoke_user_func( struct pure* f , struct pure_user_func* ufunc , const stru
     }
 
     ret = exec_block(f,result,&is_ret,&is_brk);
-
+    
     /* Clear all the parameters */
     for( i = 0 ; i < sz ; ++i ) {
         unref_val(f,par_val[i]);
@@ -913,7 +928,7 @@ int invoke_user_func( struct pure* f , struct pure_user_func* ufunc , const stru
 }
 
 static
-int invoke_fn( struct pure* f , const char* n , const struct pure_value* par , size_t sz , struct pure_value* result ) {
+int invoke_fn( struct pure* f , const char* n , struct pure_value* par , size_t sz , struct pure_value* result ) {
     /* Invoking the function, a function _CAN_ be a user defined function or a external C function */
     struct pure_user_func* ufunc;
     ufunc = symbol_table_query(&(f->cur_result->user_func),n);
@@ -924,7 +939,7 @@ int invoke_fn( struct pure* f , const char* n , const struct pure_value* par , s
         cfunc = symbol_table_query(&(f->c_func),n);
         if( cfunc != NULL ) {
             if( cfunc->cb(f,par,sz,result,cfunc->data) != 0 ) {
-                f->ec = PURE_EC_FUNC_EXEC_ERROR;
+                f->ec = PURE_EC_FUNCTION_EXECUTION_ERROR;
                 return -1;
             }
             return 0;
@@ -935,7 +950,7 @@ int invoke_fn( struct pure* f , const char* n , const struct pure_value* par , s
 }
 
 static
-int lookup_var( struct pure* f , const char var[PURE_MAX_VARNAME] , struct pure_value* ret ) {
+void lookup_var( struct pure* f , const char var[PURE_MAX_VARNAME] , struct pure_value* ret ) {
     const struct pure_value* val = NULL;
     if( f->cur_result != NULL && f->cur_result->cur_ufunc != NULL ) {
         val = symbol_table_query(f->cur_result->stk+(f->cur_result->cur_stk),var);
@@ -947,13 +962,12 @@ int lookup_var( struct pure* f , const char var[PURE_MAX_VARNAME] , struct pure_
         if( val == NULL ) {
             val = symbol_table_query(&(f->ctx_var),var);
             if( val == NULL ) {
-                f->ec = PURE_EC_NO_SUCH_VARIABLE;
-                return -1;
+                pure_value_nil(ret);
+                return;
             }
         }
     }
     ref_val(f,ret,val);
-    return 0;
 }
 
 static
@@ -969,7 +983,6 @@ int update_var( struct pure* f , const char var[PURE_MAX_VARNAME] , const struct
         if( slot == NULL ) {
             slot = symbol_table_query(&(f->ctx_var),var);
             if( slot == NULL ) {
-                f->ec = PURE_EC_NO_SUCH_VARIABLE;
                 return -1;
             }
         }
@@ -992,28 +1005,30 @@ int call_fn( struct pure* f , const char fn[PURE_MAX_VARNAME] , struct pure_valu
     size_t i;
 
     /* it is a function call */
-    next_tk(f,1);
+    if( next_tk(f,1) != TK_RPAR ) {
+        do {
+            if( rhs_val(f,par+par_sz++) != 0 )
+                return -1;
+            if( f->tk == TK_COMMA ) {
+                next_tk(f,1);
+                continue;
+            } else if( f->tk == TK_RPAR ) {
+                next_tk(f,1);
+                break;
+            } else {
+                f->ec = PURE_EC_EXPECT_COMMA;
+                return -1;
+            }
 
-    do {
-        if( expr(f,par+par_sz++) != 0 )
-            return -1;
-        if( f->tk == TK_COMMA ) {
-            next_tk(f,1);
-            continue;
-        } else if( f->tk == TK_RPAR ) {
-            next_tk(f,1);
-            break;
-        } else {
-            f->ec = PURE_EC_EXPECT_COMMA;
-            return -1;
-        }
+            if( par_sz == PURE_MAX_FUNC_PAR ) {
+                f->ec = PURE_EC_TOO_MANY_FUNCTION_PARAMETERS;
+                return -1;
+            }
 
-        if( par_sz == PURE_MAX_FUNC_PAR ) {
-            f->ec = PURE_EC_TOO_MANY_FUNCTION_PARAMETERS;
-            return -1;
-        }
-
-    } while(1);
+        } while(1);
+    } else {
+        next_tk(f,1);
+    }
 
     /* call the function */
     r = invoke_fn(f,fn,par,par_sz,ret);
@@ -1031,12 +1046,17 @@ int is_int( double val ) {
     return i == val;
 }
 
-/* var_name[EXP] */
 static
-int obj_idx( struct pure* f , const char var[PURE_MAX_VARNAME] , struct pure_value* val ) {
+int64_t to_int( double val ) {
+    double i;
+    double v = modf(val,&i);
+    return cast(int64_t,i);
+}
+
+static
+int obj_idx_ref( struct pure* f , const char var[PURE_MAX_VARNAME] , struct pure_value** val ) {
     struct pure_value obj;
     struct pure_value idx_val;
-    struct pure_value* tar;
     size_t idx;
 
     assert(f->tk == TK_LSQR);
@@ -1044,8 +1064,7 @@ int obj_idx( struct pure* f , const char var[PURE_MAX_VARNAME] , struct pure_val
     pure_value_invalid(&idx_val);
     pure_value_invalid(&obj);
 
-    if( lookup_var(f,var,&obj) != 0 )
-        goto fail;
+    lookup_var(f,var,&obj);
 
     if( obj.type == PURE_ARRAY ) {
         next_tk(f,1);
@@ -1065,12 +1084,8 @@ int obj_idx( struct pure* f , const char var[PURE_MAX_VARNAME] , struct pure_val
             goto fail;
         }
         idx = cast(size_t,idx_val.value.num);
-        tar = pure_array_index_safe(&(shared_value(&obj)->value.arr),idx);
-        if( tar == NULL ) {
-            pure_value_nil(val);
-        } else {
-            ref_val(f,val,tar);
-        }
+        *val = pure_array_index(&(shared_value(&obj)->value.arr),idx);
+
         unref_val(f,&obj);
         return 0;
     } else if( obj.type == PURE_MAP ) {
@@ -1085,12 +1100,7 @@ int obj_idx( struct pure* f , const char var[PURE_MAX_VARNAME] , struct pure_val
             f->ec = PURE_EC_MAP_INDEX_SHOULD_BE_STRING;
             goto fail;
         }
-        tar = symbol_table_query(&(shared_value(&obj)->value.map),shared_value(&idx_val)->value.str.c_str);
-        if( tar == NULL ) {
-            pure_value_nil(val);
-        } else {
-            ref_val(f,val,tar);
-        }
+        *val = symbol_table_query(&(shared_value(&obj)->value.map),shared_value(&idx_val)->value.str.c_str);
         unref_val(f,&obj);
         return 0;
     } else {
@@ -1103,6 +1113,22 @@ fail:
     return -1;
 }
 
+/* var_name[EXP] */
+static
+int obj_idx( struct pure* f , const char var[PURE_MAX_VARNAME] , struct pure_value* val ) {
+    struct pure_value* tar;
+    assert(f->tk == TK_LSQR);
+    if( obj_idx_ref(f,var,&tar) !=0 )
+        return -1;
+    else {
+        if( tar != NULL )
+            ref_val(f,val,tar);
+        else
+            pure_value_nil(val);
+        return 0;
+    }
+}
+
 static
 int var_or_call_fn( struct pure* f , const char var[PURE_MAX_VARNAME] , struct pure_value* val ) {
     switch(f->tk) {
@@ -1111,7 +1137,7 @@ int var_or_call_fn( struct pure* f , const char var[PURE_MAX_VARNAME] , struct p
     case TK_LSQR:
         return obj_idx(f,var,val);
     default:
-        return lookup_var(f,var,val);
+        lookup_var(f,var,val); return 0;
     }
 }
 
@@ -1232,20 +1258,34 @@ int term( struct pure* f , struct pure_value* val ) {
             switch(f->tk) {
             case TK_MUL:
             case TK_DIV:
+            case TK_MOD:
                 op = f->tk;
                 next_tk(f,1);
                 if( factor(f,&top) != 0 )
                     return -1;
                 if(top.type == PURE_NUMBER && val->type == PURE_NUMBER) {
-                    if(op == TK_MUL)
+                    switch(op) {
+                    case TK_MUL:
                         pure_value_number(val,top.value.num*val->value.num);
-                    else {
+                        break;
+                    case TK_DIV:
                         if( top.value.num == 0 ) {
                             f->ec = PURE_EC_DIV_ZERO;
                             return -1;
                         }
                         pure_value_number(val,val->value.num/top.value.num);
+                        break;
+                    case TK_MOD:
+                        if( top.value.num == 0 ) {
+                            f->ec = PURE_EC_DIV_ZERO;
+                            return -1;
+                        }
+                        pure_value_number(val,
+                            cast(double,to_int(val->value.num)%to_int(top.value.num)));
+                        break;
+                    default: break;
                     }
+
                 } else {
                     f->ec = PURE_EC_ONLY_NUMBER_CAN_BE_FACTOR;
                     return -1;
@@ -1378,14 +1418,21 @@ int comp( struct pure* f , struct pure_value* val) {
                     if( top.type == PURE_NIL && val->type == PURE_NIL ) {
                         pure_value_number(val,1);
                     } else {
-                        goto fail;
+                        if( top.type == PURE_NIL || val->type == PURE_NIL ) {
+                            pure_value_number(val,0);
+                        } else {
+                            goto fail;
+                        }
                     }
                     break;
                 case TK_NEQ:
                     if( top.type != val->type ) {
                         pure_value_number(val,1);
                     } else {
-                        goto fail;
+                        if( top.type == PURE_NIL && val->type == PURE_NIL )
+                            pure_value_number(val,0);
+                        else
+                            goto fail;
                     }
                     break;
                 default:
@@ -1466,31 +1513,38 @@ static
 int def_array( struct pure* f , struct pure_value* val ) {
     struct pure_value top;
     struct pure_shared_value* sv;
+    int empty = 0;
+
     assert( f->tk == TK_LSQR );
     sv = malloc_shared_value(f);
     pure_array_create(&(sv->value.arr),PURE_MAX_ARRAY_LEN);
     pure_value_invalid(&top);
     next_tk(f,1);
-
-    do {
-        if( rhs_val(f,&top) !=0 ) {
-            goto fail;
-        } 
-        pure_array_push_back(f,&(sv->value.arr),&top);
-        if( f->tk == TK_COMMA ) {
-            next_tk(f,1);
-        } else if( f->tk == TK_RSQR ) {
-            next_tk(f,1);
-            break;
-        } else {
-            f->ec = PURE_EC_ARRAY_EXPECT_RIGHT_SQURA;
-            goto fail;
-        }
-    } while(1);
+    if( f->tk != TK_RSQR ) {
+        do {
+            if( rhs_val(f,&top) !=0 ) {
+                goto fail;
+            } 
+            pure_array_push_back(f,&(sv->value.arr),&top);
+            if( f->tk == TK_COMMA ) {
+                next_tk(f,1);
+            } else if( f->tk == TK_RSQR ) {
+                next_tk(f,1);
+                break;
+            } else {
+                f->ec = PURE_EC_ARRAY_EXPECT_RIGHT_SQURA;
+                goto fail;
+            }
+        } while(1);
+    } else {
+        empty = 1;
+        next_tk(f,1);
+    }
 
     /* success eval the array */
     val->type = PURE_ARRAY;
-    pure_array_fit(&(sv->value.arr));
+    if( !empty )
+        pure_array_fit(&(sv->value.arr));
     pure_value_array(val,sv);
     return 0;
 
@@ -1563,39 +1617,42 @@ int def_map( struct pure* f , struct pure_value* val ) {
     sv = malloc_shared_value(f);
     symbol_table_create(&(sv->value.map),PURE_MAX_USER_MAP_SIZE,sizeof(struct pure_value));
 
-    next_tk(f,1);
+    if( next_tk(f,1) != TK_RBRA ) {
+        while(1) {
 
-    while(1) {
+            if( map_kv(f,&k,&v) != 0 )
+                goto fail;
 
-        if( map_kv(f,&k,&v) != 0 )
-            goto fail;
+            if(k.type != PURE_STRING) {
+                f->ec = PURE_EC_MAP_INDEX_SHOULD_BE_STRING;
+                goto fail;
+            }
 
-        if(k.type != PURE_STRING) {
-            f->ec = PURE_EC_MAP_INDEX_SHOULD_BE_STRING;
-            goto fail;
+            slot = symbol_table_insert(
+                &(sv->value.map),shared_value(&k)->value.str.c_str,&insert);
+
+            /* insert the value into the table */
+            if( insert ) {
+                *slot = v;
+            } else {
+                ref_val(f,slot,&v);
+                unref_val(f,&v);
+                unref_val(f,&k);
+            }
+
+            if( f->tk == TK_COMMA ) {
+                next_tk(f,1);
+            } else if( f->tk == TK_RBRA ) {
+                next_tk(f,1);
+                break;
+            } else {
+                f->ec = PURE_EC_EXPECT_COMMA;
+                goto fail;
+            }
         }
-
-        slot = symbol_table_insert(
-            &(sv->value.map),shared_value(&k)->value.str.c_str,&insert);
-
-        /* insert the value into the table */
-        if( insert ) {
-            *slot = v;
-        } else {
-            ref_val(f,slot,&v);
-            unref_val(f,&v);
-            unref_val(f,&k);
-        }
-
-        if( f->tk == TK_COMMA ) {
-            next_tk(f,1);
-        } else if( f->tk == TK_RBRA ) {
-            next_tk(f,1);
-            break;
-        } else {
-            f->ec = PURE_EC_EXPECT_COMMA;
-            goto fail;
-        }
+    } else {
+        /* consume the } for the empty map */
+        next_tk(f,1);
     }
 
     pure_value_map(val,sv);
@@ -1627,6 +1684,7 @@ int assign_or_call_fn( struct pure* f ) {
     int ret;
     int offset;
     struct pure_value val;
+    struct pure_value* idx;
 
     pure_value_invalid(&val);
     
@@ -1638,21 +1696,39 @@ int assign_or_call_fn( struct pure* f ) {
     }
     next_tk(f,offset);
     /* checking it is a function call or a assignment */
-    if( f->tk == TK_LPAR ) {
-        ret = call_fn(f,var,&val);
-        if( ret == 0 )
+    switch(f->tk) {
+    case TK_LPAR:
+        if( (ret = call_fn(f,var,&val)) !=0 )
             unref_val(f,&val);
-    } else if( f->tk == TK_ASSIGN ) {
-        struct pure_value tmp;
-        pure_value_invalid(&tmp);
-        next_tk(f,1);
-        if( rhs_val(f,&tmp) != 0 ) {
-            return -1;
+        goto done;
+    case TK_LSQR: /* We allow indexer as left hand side value */
+        ret = obj_idx_ref(f,var,&idx);
+        if( ret != 0 )
+            goto done;
+        if(f->tk != TK_ASSIGN) {
+            f->ec = PURE_EC_SYNTAX_ERROR;
+            goto done;
         }
-        update_var(f,var,&tmp);
-        unref_val(f,&tmp);
-        ret = 0;
+        next_tk(f,1);
+        if( (ret=rhs_val(f,&val)) !=0) {
+            goto done;
+        }
+        /* What we really do here is _REPLACE_ that value*/
+        ref_val(f,idx,&val);
+        unref_val(f,&val);
+        break;
+    case TK_ASSIGN: /* Typical assignment, starts with a variable */
+        next_tk(f,1);
+        if( (ret=rhs_val(f,&val)) != 0)
+            goto done;
+        update_var(f,var,&val);
+        unref_val(f,&val);
+        break;
+    default: 
+        f->ec = PURE_EC_UNKNOWN_LEFT_HANDSIDE_VALUE;
+        return -1;
     }
+done:
     if( ret == 0 && f->tk != TK_SEMICON ) {
         f->ec = PURE_EC_EXPECT_SEMICON;
         return -1;
@@ -1680,10 +1756,13 @@ int ctrl_foreach_arr( struct pure* f , char var[PURE_MAX_VARNAME] , struct pure_
     int pc = f->loc;
     int is_ret = *ret_back;
     int is_brk = *brk;
+    int exec= 0;
 
     *brk = *ret_back = 0;
 
-    for( i = 0 ; i < a->cap ; ++i ) {
+    for( i = 0 ; i < a->sz ; ++i ) {
+        exec = 1;
+
         set_pc(f,pc);
         update_var(f,var,a->arr+i);
         *ret_back = is_ret;
@@ -1699,6 +1778,17 @@ int ctrl_foreach_arr( struct pure* f , char var[PURE_MAX_VARNAME] , struct pure_
         }
     }
 
+    if(!exec) {
+        /* if the loop body haven't been executed the current loc of pure is still
+         * pointed to the beginning of the code block, we need to skip this block */
+        if( f->tk != TK_LBRA || skip_block(f) != 0 ) {
+            f->ec = PURE_EC_SYNTAX_ERROR;
+            unref_val(f,arr);
+            return -1;
+        }
+    }
+
+    unref_val(f,arr);
     return 0;
 }
 
@@ -1715,12 +1805,15 @@ int ctrl_foreach_map( struct pure* f , char k_var[PURE_MAX_VARNAME] , char v_var
     int is_ret = *ret_back;
     int is_brk = *brk;
     int cursor = symbol_table_iter_start(a,&v,&n);
+    int exec= 0;
 
     pure_value_invalid(&pv_name);
     sv = malloc_shared_value(f);
     *brk = *ret_back = 0;
 
     while( symbol_table_iter_has_next(a,cursor) ) {
+        exec = 1;
+
         set_pc(f,pc);
         /* populate the shared value , since the map returns the const char*, we
          * need a pure_value object for adaption here */
@@ -1752,6 +1845,17 @@ int ctrl_foreach_map( struct pure* f , char k_var[PURE_MAX_VARNAME] , char v_var
         cursor = symbol_table_iter_deref(a,cursor,&v,&n);
     }
 
+    if(!exec) {
+        /* if the loop body haven't been executed the current loc of pure is still
+         * pointed to the beginning of the code block, we need to skip this block */
+        if( f->tk != TK_LBRA || skip_block(f) != 0 ) {
+            f->ec = PURE_EC_SYNTAX_ERROR;
+            unref_val(f,&pv_name);
+            unref_val(f,v);
+            return -1;
+        }
+    }
+
     return 0;
 }
 
@@ -1761,9 +1865,11 @@ int ctrl_classic_for( struct pure* f , char var[PURE_MAX_VARNAME] , int64_t star
     int pc = f->loc;
     int is_ret = *ret_back;
     int is_brk = *brk;
+    int exec = 0;
 
     for( ; start < end ; start += step ) {
         struct pure_value val;
+        exec = 1;
         set_pc(f,pc);
 
         pure_value_number(&val,cast(double,start));
@@ -1777,6 +1883,15 @@ int ctrl_classic_for( struct pure* f , char var[PURE_MAX_VARNAME] , int64_t star
         }
         if( *ret_back || *brk ) {
             return 0;
+        }
+    }
+
+    if(!exec) {
+        /* if the loop body haven't been executed the current loc of pure is still
+         * pointed to the beginning of the code block, we need to skip this block */
+        if( f->tk != TK_LBRA || skip_block(f) != 0 ) {
+            f->ec = PURE_EC_SYNTAX_ERROR;
+            return -1;
         }
     }
 
@@ -1958,6 +2073,9 @@ int ctrl_loop( struct pure* f , struct pure_value* ret , int* ret_back , int* br
                 return 0;
             }
         } else {
+            if( skip_block(f) != 0 )
+                return -1;
+
             *brk = *ret_back = 0;
             unref_val(f,&cond);
             return 0;
@@ -2158,6 +2276,11 @@ int def_fn( struct pure* f ) {
     if(f->tk != TK_LPAR)
         return -1;
     next_tk(f,1);
+    if( f->tk == TK_RPAR ) {
+        /* empty function parameter list */
+        next_tk(f,1);
+        goto done;
+    }
 
     do {
         if(f->tk != TK_VAR || (offset=variable(f,fname)) <=0)
@@ -2180,7 +2303,8 @@ int def_fn( struct pure* f ) {
             return -1;
         }
     } while(1);
-
+    
+done:
     /* Eat a start '{' and place the function first PC right after '{' */
     if(f->tk != TK_LBRA) {
         f->ec = PURE_EC_FUNCTION_NO_BODY;
@@ -2328,6 +2452,7 @@ int skip_line( struct pure* f ) {
             DO(TK_FUNC,4);
             DO(TK_ASSIGN,1);
             DO(TK_COLON,1);
+            DO(TK_MOD,1);
 
     #undef DO
         default: assert(0); return -1;
@@ -2414,6 +2539,7 @@ int skip_block( struct pure* f ) {
             DO(TK_FUNC,4);
             DO(TK_ASSIGN,1);
             DO(TK_COLON,1);
+            DO(TK_MOD,1);
 
 #undef DO
         default: return -1;
@@ -2433,6 +2559,328 @@ int interp( struct pure* f ) {
     return 0;
 }
 
+#ifndef NO_BUILT_IN_LIB
+static
+const char* pure_type_name( int tp ) {
+    switch(tp) {
+    case PURE_INVALID: return "Invalid";
+    case PURE_NIL: return "Nil";
+    case PURE_NUMBER: return "Number";
+    case PURE_ARRAY: return "Array";
+    case PURE_MAP: return "Map";
+    case PURE_USER_DATA: return "UserData";
+    default: return "Unknown";
+    }
+}
+/* helper function to format the error */
+#define expect_par_sz(p,exp_sz,sz,fname) \
+    do { \
+        if( (exp_sz) != (sz) ) { \
+            sprintf((p)->ex_err_str,"The parameter size of function %s not match, exepct %d but get %d.", \
+            fname,exp_sz,sz); \
+            (p)->ec = PURE_EC_FUNCTION_EXECUTION_ERROR; \
+            return -1; \
+        } \
+    } while(0)
+
+#define expect_par_type(p,i,exp_tp,tp,fname) \
+    do { \
+        if( (exp_tp) != (tp) ) { \
+            sprintf((p)->ex_err_str,"The parameter %d of function %s type not match, expect %s but get %s", \
+            i,fname,pure_type_name(exp_tp),pure_type_name(tp)); \
+            (p)->ec = PURE_EC_FUNCTION_EXECUTION_ERROR; \
+            return -1; \
+        } \
+    } while(0)
+
+#define func_set_err(p,reason,fname) \
+    do { \
+        sprintf((p)->ex_err_str,"The function %s execution has error:%s",reason); \
+        (p)->ec = PURE_EC_FUNCTION_EXECUTION_ERROR; \
+    } while(0);
+
+static
+const char* to_str( const char* s , char buf[PURE_MAX_LOCAL_BUF_SIZE] , size_t* len ) {
+    *len = strlen(s);
+    if( *len >= PURE_MAX_LOCAL_BUF_SIZE )
+        return STRDUP(s);
+    else
+        return strcpy(buf,s);
+}
+
+/* to_str */
+static 
+int lib_to_str( struct pure* p , struct pure_value* par , size_t sz , 
+                struct pure_value* result , void* ptr ) {
+    char buf[256];
+    int len;
+    struct pure_shared_value* sv;
+
+    pure_value_invalid(result);
+    expect_par_sz(p,1,sz,"to_str");
+    if( par[0].type == PURE_STRING ) {
+        ref_val(p,result,par);
+        return 0;
+    }
+    /* We expect a number */
+    expect_par_type(p,1,PURE_NUMBER,par[0].type,"to_str");
+    sv = malloc_shared_value(p);
+    len = sprintf(buf,"%.6f",par->value.num);
+    if( len < PURE_MAX_LOCAL_BUF_SIZE ) {
+        sv->value.str.c_str=strcpy(sv->buf,buf);
+    } else {
+        sv->value.str.c_str = STRDUP(buf);
+    }
+    sv->value.str.sz = cast(size_t,len);
+    pure_value_str(result,sv);
+    return 0;
+}
+/* to_num */
+static
+int lib_to_num( struct pure* p , struct pure_value* par , size_t sz ,
+                struct pure_value* result , void* ptr ) {
+    expect_par_sz(p,1,sz,"to_num");
+    if( par->type == PURE_NUMBER ) {
+        ref_val(p,result,par);
+        return 0;
+    }
+    expect_par_type(p,1,PURE_STRING,par->type,"to_num");
+    errno = 0;
+    result->value.num = strtod(shared_value(result)->value.str.c_str,NULL);
+    if(errno !=0) {
+        func_set_err(p,strerror(errno),"to_num");
+        return -1;
+    }
+    pure_value_number(result,result->value.num);
+    return 0;
+}
+
+/* is_int */
+static
+int lib_is_int( struct pure* p , struct pure_value* par , size_t sz ,
+                struct pure_value* result , void* ptr ) {
+    expect_par_sz(p,1,sz,"is_int");
+    pure_value_invalid(result);
+    if( par->type == PURE_NUMBER ) {
+        if( is_int(par->value.num) )
+            pure_value_number(result,1);
+    }
+    if( result->type == PURE_INVALID )
+        pure_value_number(result,0);
+    return 0;
+}
+
+/* to_int */
+static
+int lib_to_int( struct pure* p ,struct pure_value* par , size_t sz ,
+                struct pure_value* result , void* ptr ) {
+    expect_par_sz(p,1,sz,"to_int");
+    expect_par_type(p,1,PURE_NUMBER,par->type,"to_int");
+    pure_value_number(result,cast(double,to_int(par->value.num)));
+    return 0;
+}
+
+/* type */
+static
+int lib_type( struct pure* p , struct pure_value* par , size_t sz , 
+              struct pure_value* result , void* ptr ) {
+    struct pure_shared_value* sv;
+    expect_par_sz(p,1,sz,"type");
+    sv = malloc_shared_value(p);
+    switch( par->type ) {
+    case PURE_INVALID:
+        sv->value.str.c_str = to_str("invalid",sv->buf,&(sv->value.str.sz));
+        pure_value_str(result,sv);
+        return 0;
+    case PURE_NUMBER:
+        sv->value.str.c_str = to_str("number",sv->buf,&(sv->value.str.sz));
+        pure_value_str(result,sv);
+        return 0;
+    case PURE_NIL:
+        sv->value.str.c_str = to_str("nil",sv->buf,&(sv->value.str.sz));
+        pure_value_str(result,sv);
+        return 0;
+    case PURE_ARRAY:
+        sv->value.str.c_str = to_str("array",sv->buf,&(sv->value.str.sz));
+        pure_value_str(result,sv);
+        return 0;
+    case PURE_MAP:
+        sv->value.str.c_str = to_str("map",sv->buf,&(sv->value.str.sz));
+        pure_value_str(result,sv);
+        return 0;
+    case PURE_USER_DATA:
+        sv->value.str.c_str = to_str("userdata",sv->buf,&(sv->value.str.sz));
+        pure_value_str(result,sv);
+        return 0;
+    default:
+        sv->value.str.c_str = to_str("unknown",sv->buf,&(sv->value.str.sz));
+        pure_value_str(result,sv);
+        return 0;
+    }
+}
+
+/* concate */
+static
+int lib_concate( struct pure* p , struct pure_value* par , size_t sz,
+                 struct pure_value* result, void* ptr ) {
+    char num_buf[256];
+    int num_buf_sz;
+    size_t i;
+    char stk_buf[1024];
+    char* buf = stk_buf;
+    char* pos = buf;
+    char* end = buf+1024;
+    struct pure_shared_value* sv;
+
+#define GROW_BUF(L) do { \
+        char* tmp = malloc(L); \
+        if(buf != stk_buf) free(buf); \
+        memcpy(buf,tmp,end-buf); \
+        end = tmp + (L); \
+        pos = tmp + (pos-buf); \
+        buf = tmp; \
+    } while(0)
+
+    for( i = 0 ; i < sz ; ++i ) {
+        switch(par[i].type) {
+        case PURE_NUMBER:
+            num_buf_sz = sprintf(num_buf,"%.6f",par[i].value.num);
+            if( end-pos <= num_buf_sz ) {
+                GROW_BUF((end-buf)*2+num_buf_sz);
+            }
+            memcpy(pos,num_buf,num_buf_sz);
+            pos += num_buf_sz;
+            break;
+        case PURE_STRING:
+            if( cast(size_t,end-pos) <= shared_value(par+i)->value.str.sz ) {
+                GROW_BUF((end-buf)*2+(shared_value(par+i)->value.str.sz));
+            }
+			memcpy(pos,shared_value(par+i)->value.str.c_str,
+                shared_value(par+i)->value.str.sz);
+            pos += shared_value(par+i)->value.str.sz;
+            break;
+        default:
+            break; /* skip unknown type */
+        }
+    }
+
+#undef GROW_BUF
+
+    *pos = 0;
+    sv = malloc_shared_value(p);
+
+    if( pos-buf <= PURE_MAX_LOCAL_BUF_SIZE ) {
+        sv->value.str.c_str=strcpy(sv->buf,buf);
+    } else {
+        if(buf == stk_buf)
+            sv->value.str.c_str = STRDUP(buf);
+        else
+            sv->value.str.c_str = buf;
+    }
+
+    pure_value_str(result,sv);
+    return 0;
+}
+
+/* arr_add */
+static
+int lib_arr_add( struct pure* p , struct pure_value* par , size_t sz ,
+             struct pure_value* result , void* ptr ) {
+    pure_value_invalid(result);
+    expect_par_sz(p,2,sz,"arr_add");
+    expect_par_type(p,1,PURE_ARRAY,par->type,"arr_add");
+    pure_array_push_back(p,&(shared_value(par)->value.arr),par+1);
+    return 0;
+}
+
+/* arr_del */
+static
+int lib_arr_del( struct pure* p , struct pure_value* par , size_t sz , 
+                 struct pure_value* result , void* ptr ) {
+    pure_value_invalid(result);
+    /* We cannot remove an element in the array, so just create new one */
+    expect_par_sz(p,2,sz,"arr_del");
+    expect_par_type(p,1,PURE_ARRAY,par->type,"arr_del");
+    expect_par_type(p,2,PURE_NUMBER,par[1].type,"arr_del");
+    /* modify the original par parameters _UNDER THE HOOD_ */
+    pure_array_remove(p,&(shared_value(par)->value.arr),cast(int,to_int(par[1].value.num)));
+    return 0;
+}
+
+/* map_insert */
+static
+int lib_map_insert( struct pure* p , struct pure_value* par , size_t sz , 
+                    struct pure_value* result , void* ptr ) {
+    int insert;
+    struct pure_value* slot;
+    expect_par_sz(p,3,sz,"map_insert");
+    expect_par_type(p,1,PURE_MAP,par->type,"map_insert");
+    expect_par_type(p,2,PURE_STRING,par->type,"map_insert");
+    /* insert new key value into the map */
+    slot = symbol_table_insert(&(shared_value(par)->value.map),
+        shared_value(par+1)->value.str.c_str,&insert);
+    if( insert ) {
+        pure_value_invalid(slot);
+    }
+    ref_val(p,slot,par+2);
+    return 0;
+}
+
+/* print */
+#ifndef NO_PRINT
+static
+int lib_print( struct pure* p , struct pure_value* par , size_t sz , 
+               struct pure_value* result , void* ptr ) {
+    size_t i;
+    pure_value_invalid(result);
+
+    for( i = 0 ; i < sz ; ++i ) {
+        switch(par[i].type) {
+        case PURE_NUMBER:
+            printf("%.6f",par[i].value.num);
+            break;
+        case PURE_STRING:
+            printf("%s",shared_value(par+i)->value.str.c_str);
+            break;
+        case PURE_NIL:
+            printf("<nil>");
+            break;
+        case PURE_MAP:
+            printf("<map>");
+            break;
+        case PURE_ARRAY:
+            printf("<array>");
+            break;
+        case PURE_USER_DATA:
+            printf("<user_data>");
+            break;
+        default:
+            break;
+        }
+    }
+    printf("\n");
+    return 0;
+}
+
+#endif /*NO_PRINT*/
+
+
+static
+void lib_open( struct pure* p ) {
+    pure_reg_func(p,"to_str",lib_to_str,NULL);
+    pure_reg_func(p,"to_num",lib_to_num,NULL);
+    pure_reg_func(p,"to_int",lib_to_int,NULL);
+    pure_reg_func(p,"is_int",lib_is_int,NULL);
+    pure_reg_func(p,"type",lib_type,NULL);
+    pure_reg_func(p,"concate",lib_concate,NULL);
+    pure_reg_func(p,"arr_add",lib_arr_add,NULL);
+    pure_reg_func(p,"arr_del",lib_arr_del,NULL);
+    pure_reg_func(p,"map_insert",lib_map_insert,NULL);
+    pure_reg_func(p,"print",lib_print,NULL);
+
+}
+#endif /* NO_BUILT_IN_LIB */
+
 
 /* ===========================================
  * PUBLIC INTERFACE 
@@ -2447,6 +2895,9 @@ struct pure* pure_create() {
     f->loc = 0;
     f->ec = PURE_EC_NO_ERROR;
     f->cur_result = NULL;
+#ifndef NO_BUILT_IN_LIB
+    lib_open(f);
+#endif /* NO_BUILT_IN_LIB */
     return f;
 }
 
@@ -2546,8 +2997,7 @@ const char* pure_last_error( struct pure* p , int* ec , int* loc ) {
     case PURE_EC_NO_ERROR: return "No error";
     case PURE_EC_TOO_MANY_FUNCTION_PARAMETERS: return "Too many function parameters";
     case PURE_EC_NO_SUCH_FUNC: return "No such function";
-    case PURE_EC_FUNC_EXEC_ERROR: return "The function execution has an error,check your register function for more message";
-    case PURE_EC_NO_SUCH_VARIABLE: return "No such variable";
+    case PURE_EC_FUNCTION_EXECUTION_ERROR: return "The function execution has an error,check your register function for more message";
     case PURE_EC_UNKNOWN_CONSTANT_SYMBOL: return "Cannot parse the constant value you provide";
     case PURE_EC_UNKNOWN_UNARY_OPRAND: return "Unknown unary operand";
     case PURE_EC_ONLY_NUMBER_CAN_BE_FACTOR: return "Factor can only accept number";
@@ -2705,18 +3155,16 @@ int pure_value_get_user_data( const struct pure_value* f , void** udata ) {
     return 0;
 }
 
-struct pure_value*
-pure_array_index( const struct pure_array* arr , size_t idx ) {
-    assert(idx < arr->sz);
-    return arr->arr + idx;
-}
-
 void pure_array_push( struct pure* p , struct pure_array* arr , const struct pure_value* val ) {
     pure_array_push_back(p,arr,val);
 }
 
-struct pure_value* pure_map_index( const struct pure_map* map , const char* key ) {
-    return symbol_table_query(cast(struct symbol_table*,map),key);
+struct pure_value* 
+pure_array_index( const struct pure_array* arr , size_t index ) {
+    if( index >= 0 && cast(size_t,index) < arr->sz )
+        return arr->arr + index;
+    else
+        return NULL;
 }
 
 int pure_map_insert( struct pure* p , const struct pure_map* map , const char* key , struct pure_value* val ) {
@@ -2744,9 +3192,8 @@ int pure_map_foreach( const struct pure_map* map , pure_foreach_cb cb , void* da
 /* =====================================
  * TEST 
  * ====================================*/
-
+#ifndef NDEBUG
 #ifdef UTEST
-#include <time.h>
 /* 1 symbol_table test */
 void test_symbol_table() {
     struct symbol_table tb;
@@ -2977,7 +3424,7 @@ void test_parser_expr() {
     }
 
     {
-        char str[] = "1+2>=3";
+        char str[] = "(1+2)%4>3";
         struct pure_value val;
         struct pure* p = pure_create();
         p->data = str;
@@ -2986,7 +3433,7 @@ void test_parser_expr() {
 
         assert(expr(p,&val) ==0);
         assert(val.type == PURE_NUMBER);
-        assert(val.value.num == 1);
+        assert(val.value.num == 0);
     }
 
     {
@@ -3032,9 +3479,47 @@ void test_parser_expr() {
         assert(val.type == PURE_NUMBER);
         assert(val.value.num == 1);
     }
+
+    {
+        char str[] = "\"John\"==\"John\" && nil != 1";
+        struct pure_value val;
+        struct pure* p = pure_create();
+        struct pure_value var;
+        p->cur_result = pure_result_create();
+        p->data = str;
+        p->loc = 0;
+        next_tk(p,0);
+
+        /* insert a context variable */
+        pure_value_number(&var,123);
+        pure_reg_var(p,"a",&var);
+
+        assert(expr(p,&val) ==0);
+        assert(val.type == PURE_NUMBER);
+        assert(val.value.num == 1);
+    }
+
+    {
+        char str[] = "nil == c;";
+        struct pure_value val;
+        struct pure* p = pure_create();
+        struct pure_value var;
+        p->cur_result = pure_result_create();
+        p->data = str;
+        p->loc = 0;
+        next_tk(p,0);
+
+        /* insert a context variable */
+        pure_value_number(&var,123);
+        pure_reg_var(p,"a",&var);
+
+        assert(expr(p,&val) ==0);
+        assert(val.type == PURE_NUMBER);
+        assert(val.value.num == 1);
+    }
 }
 
-int dump_cb( struct pure* p , const struct pure_value* par , size_t sz , struct pure_value* result , void*  data ) {
+int dump_cb( struct pure* p , struct pure_value* par , size_t sz , struct pure_value* result , void*  data ) {
     size_t i = 0 ; 
     for( ; i < sz ; ++i ) {
         switch(par[i].type) {
@@ -3073,7 +3558,7 @@ void test_parser_array() {
 }
 
 int printf_cb( struct pure* p , 
-               const struct pure_value* par , size_t sz , 
+               struct pure_value* par , size_t sz , 
                struct pure_value* result ,  void*  data ) {
     size_t i = 0 ; 
     for( ; i < sz ; ++i ) {
@@ -3276,6 +3761,16 @@ void test_array_foreach() {
         pure_reg_func(p,"dump",dump_cb,NULL);
         assert( pure_run_str(p,str) == 0 );
     }
+    {
+        char str[] = \
+            "a=[];" \
+            "func myfunc(a) { for(i,a) { dump(i); } }" \
+            "myfunc(a);";
+
+        struct pure* p = pure_create();
+        pure_reg_func(p,"dump",dump_cb,NULL);
+        assert( pure_run_str(p,str) == 0 );
+    }
 }
 
 void test_map_foreach() {
@@ -3290,6 +3785,113 @@ void test_map_foreach() {
         assert( pure_run_str(p,str) == 0 );
     }
 }
+
+void test_1() {
+    {
+        /* empty map dump */
+        char str[] = \
+            "a={};func myfunc(a){for(k,a){dump(k);dump(v);}}myfunc(a);";
+
+        struct pure* p = pure_create();
+        pure_reg_func(p,"dump",dump_cb,NULL);
+        assert( pure_run_str(p,str) == 0 );
+    }
+    {
+        /* empty array dump */
+        char str[] = \
+            "func myfunc(){ a=[]; for(k,a){dump(k);} }myfunc();";
+        struct pure* p = pure_create();
+        pure_reg_func(p,"dump",dump_cb,NULL);
+        assert( pure_run_str(p,str) == 0 );
+    }
+    {
+        /* empty function definition */
+        char str[] = \
+            "func f1(){ a = 1; return a; } func f2(i) { return 2*i; } f1(); f2(10); ";
+        struct pure* p = pure_create();
+        pure_reg_func(p,"dump",dump_cb,NULL);
+        assert( pure_run_str(p,str) == 0 );
+    }
+}
+
+void test_2() {
+    /*
+    {
+        char str[] = "func IsOdd(num) { \
+            if( num % 2 == 0 )  \
+                return 0; \
+            else \
+                return 1; \
+            } \
+            func FilterOutOdd(arr) { \
+                ret = []; \
+                for( i , arr ) { \
+                    if( IsOdd(i) ) { \
+                        arr_add(ret,i); \
+                    } \
+                } \
+                return ret; \
+            } \
+            arr = FilterOutOdd([1,2,3,4,5,6,7,8,9,10]); \
+            func dumpArr(a) { \
+                for(k,a) { \
+                    print(k); \
+                } \
+            } \
+            dumpArr(arr);";
+        struct pure* p = pure_create();
+        assert( pure_run_str(p,str) == 0 );
+    }
+    */
+    {
+        char str[] = "SimpleMap = {\"Key1\":\"Value1\",\"Key2\":\"Value2\",\"Key3\":1234,\"Key4\":[1,2,3,4,5]}; \
+            print(SimpleMap[\"Key1\"]); \
+        print(SimpleMap[\"Key2\"]); \
+        SimpleMap[\"Key2\"] = nil; \
+        print(SimpleMap[\"Key2\"]);";
+        struct pure* p = pure_create();
+        assert( pure_run_str(p,str) == 0 );
+    }
+}
+
+int main() {
+    printf("-------------------------Unit test start!--------------------\n");
+    test_symbol_table();
+    test_pure_value();
+    test_lexer();
+    test_parser_expr();
+    test_parser_array();
+    test_assignment();
+    test_parser_for();
+    test_parser_loop();
+    test_parser_cond();
+    test_parser_func();
+    test_run_str();
+    test_map_index();
+    test_array_foreach();
+    test_map_foreach();
+    test_2(); 
+    printf("-------------------------Unit test finish!--------------------\n");
+    return 0;
+}
+#endif /* UTEST */
+#endif 
+
+#ifdef NDEBUG
+#ifdef PERF_TEST
+#include <time.h>
+
+int printf_cb( struct pure* p , 
+struct pure_value* par , size_t sz , 
+struct pure_value* result ,  void*  data ) {
+    size_t i = 0 ; 
+    for( ; i < sz ; ++i ) {
+        printf("%f\n",par[i].type == PURE_NUMBER ? par[i].value.num : -1.0 );
+    }
+    pure_value_nil(result);
+    return 0;
+}
+
 
 static
 int fib(int i) {
@@ -3314,27 +3916,14 @@ void performance() {
 }
 
 int main() {
-    printf("-------------------------Unit test start!--------------------\n");
-    test_symbol_table();
-    test_pure_value();
-    test_lexer();
-    test_parser_expr();
-    test_parser_array();
-    test_assignment();
-    test_parser_for();
-    test_parser_loop();
-    test_parser_cond();
-    test_parser_func();
-    test_run_str();
-    test_map_index();
-    test_array_foreach();
-    test_map_foreach();
     performance();
-    printf("-------------------------Unit test finish!--------------------\n");
     return 0;
 }
+
+#endif /* PERF_TEST */
+#endif /* NDEBUG */
+
  
-#endif UTEST /* UTEST */
 #ifdef __cplusplus
 }
 #endif /*__cplusplus */

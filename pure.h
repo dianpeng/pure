@@ -33,7 +33,7 @@ struct pure_value {
 #define PURE_USER_DATA 6
 
 typedef int (*pure_cb)( struct pure* p , 
-                        const struct pure_value* par , size_t sz , 
+                        struct pure_value* par , size_t sz , 
                         struct pure_value* result , 
                         void* );
 
