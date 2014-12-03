@@ -11,13 +11,21 @@ for different program to describe its configuration data.
 
 # What's the feature ?
 1) Built-in JSON like data structure
+
 2) Function invocation, definition and recursive function
+
 3) C function extension
+
 4) Simple and intuitive API
+
 5) Supports while/for/foreach/if else if else control structure
+
 6) C-like syntax 
+
 7) Automatic garbage collection by reference count
+
 8) Small library size (with -Os , gcc generates a 28KB library)
+
 
 # Sample
 
@@ -70,8 +78,8 @@ _HUNDREDS_ times slower than a native implementation in C. However, if the execu
 is way more than enough and even better than some famous script language.
 
 # Build
-1.Make
-2.VS
+1. Make
+2. VS
 
 #License
 MIT
