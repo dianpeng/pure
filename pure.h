@@ -44,13 +44,11 @@ struct pure* pure_create();
 void pure_delete( struct pure* );
 void pure_reg_func( struct pure* , const char* name , pure_cb cb , void* );
 void pure_reg_var( struct pure* , const char* name , struct pure_value* val );
-int pure_run_file( struct pure* , const char* file );
-int pure_run_str( struct pure* , const char* str );
-
-const char* pure_last_error( struct pure* , int* ec , int* loc );
+int pure_run_file( struct pure* , const char* file , const char** error , int* ec , int* line , int* pos );
+int pure_run_str( struct pure* , const char* str , const char** error , int* ec , int* line , int* pos );
 
 /* pure result */
-int pure_get( struct pure* , const char* name , struct pure_value* val );
+int pure_get( struct pure* , const char* name , struct pure_value** val );
 int pure_foreach( struct pure* , pure_foreach_cb cb ,void* udata );
 
 /* pure value creation */
@@ -69,19 +67,30 @@ void pure_value_unref( struct pure* , struct pure_value* );
 void pure_value_copy( struct pure* , struct pure_value* cp );
 
 /* pure value getter */
-#define pure_value_get_num(val,num) do { *(num) = (val)->num; } while(0)
+static
+int pure_value_get_num( const struct pure_value* val , double* num ) {
+    if(val->type != PURE_NUMBER)
+        return -1;
+    *num = val->value.num;
+    return 0;
+}
 int pure_value_get_str( const struct pure_value* , const char** );
 int pure_value_get_arr( const struct pure_value* , struct pure_array** arr );
+int pure_value_get_map( const struct pure_value* , struct pure_map** map );
 int pure_value_get_user_data( const struct pure_value* , void** udata );
 
 /* pure array reference */
-struct pure_value* pure_array_index( const struct pure_array* arr , size_t idx );
+size_t pure_array_size( const struct pure_array* arr );
+int pure_array_index( const struct pure_array* arr , size_t idx , struct pure_value** val );
 void pure_array_push( struct pure* p , struct pure_array* arr , const struct pure_value* val );
 
 /* pure map reference */
-struct pure_value* pure_map_index( const struct pure_map* map , const char* key );
+int pure_map_index( const struct pure_map* map , const char* key , struct pure_value** val );
 int pure_map_insert( struct pure* p , const struct pure_map* map , const char* key , struct pure_value* val );
-int pure_map_foreach( const struct pure_map* map , pure_foreach_cb cb , void* data );
+/* foreach map */
+int pure_map_iter_start( const struct pure_map* map , const char** key , struct pure_value** val );
+int pure_map_iter_has_next( const struct pure_map* map , int cursor );
+int pure_map_iter_deref( const struct pure_map* map , int cursor , const char** key , struct pure_value** val );
 
 #ifdef __cplusplus
 }

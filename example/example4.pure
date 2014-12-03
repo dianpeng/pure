@@ -1,0 +1,19 @@
+# This example shows how the configuration data can be retrieved from the host 
+# software side .
+
+AppWidth = 1024;
+AppHeight= 768;
+UserList=["John","Lucy","Alan"];
+
+func GenerateOddNumber(arr){ 
+	ret = [];
+	for(val,arr) {
+		if( val % 2 != 0 )
+			arr_add(ret,val);
+		}
+	}
+	return ret;
+}
+
+OddArray=GenerateOddNumber([1,2,3,4,5,6,7,8,9,10]);
+

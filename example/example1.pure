@@ -1,0 +1,32 @@
+# Test if the number is Odd number
+func IsOdd(i) {
+	if( i % 2 == 0 ) {
+		return 0;
+	} else {
+		return 1;
+	}
+}
+
+# Filter out the odd number and return it as a new array
+func FilterOutOdd(array) {
+	ret = [];
+	for( num , array ) {
+		if( IsOdd(num) ) {
+			arr_add(ret,num);
+		}
+	}
+	return ret;
+}
+
+# Print each array elements
+func PrintArray(array) {
+	print("Dump Array");
+	for( num , array ) {
+		print("\t",num);
+	}
+	print("Dump Array Done\n");
+}
+
+MyArray = FilterOutOdd([1,2,3,4,5,6,7,8,9,10]);
+PrintArray(MyArray);
+	
