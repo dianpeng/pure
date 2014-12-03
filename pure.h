@@ -48,7 +48,6 @@ typedef int (*pure_cb)( struct pure* p ,
                         void* );
 
 typedef void (*pure_user_data_clean_cb)( void* udata );
-typedef int (*pure_foreach_cb)( const char* name , struct pure_value* val , void* data );
 
 /* Create Pure object , after using it, please call pure_delete to release the memory */
 struct pure* pure_create();
@@ -72,8 +71,10 @@ int pure_run_str( struct pure* , const char* str , const char** error , int* ec 
  * use pure_get to retrieve these variables value. */
 int pure_get( struct pure* , const char* name , struct pure_value** val );
 
-/* For each allows you to get all the value one by one */
-int pure_foreach( struct pure* , pure_foreach_cb cb ,void* udata );
+/* Iterate through all the variable that resides inside of the configuration file */
+int pure_iter_start( struct pure* p , const char** key , struct pure_value** val );
+int pure_iter_has_next( struct pure*  p ,int cursor );
+int pure_iter_deref( struct pure* p , int cursor , const char** key , struct pure_value** val );
 
 /* These function is used to attach a type of value into pure_value. */
 void pure_value_new_num( struct pure* , double n , struct pure_value* );

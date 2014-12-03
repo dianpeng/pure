@@ -3158,22 +3158,19 @@ int pure_get( struct pure* p , const char* name , struct pure_value** val ) {
     }
 }
 
-int pure_foreach( struct pure* p , pure_foreach_cb cb ,void* udata ) {
-    void* data;
-    const char* name;
-    int idx;
-    int ret;
-    if( p->cur_result == NULL )
-        return -1;
+int pure_iter_start( struct pure* p , const char** key , struct pure_value** val ) {
+    assert(p->cur_result);
+    return symbol_table_iter_start(&(p->cur_result->global_var),cast(void**,val),key);
+}
 
-    idx = symbol_table_iter_start(&(p->cur_result->global_var),&data,&name);
+int pure_iter_has_next( struct pure*  p ,int cursor ) {
+    assert(p->cur_result);
+    return symbol_table_iter_has_next(&(p->cur_result->global_var),cursor);
+}
 
-    while( symbol_table_iter_has_next(&(p->cur_result->global_var),idx) ) {
-        if( (ret=cb(name,cast(struct pure_value*,data),udata)) !=0 )
-            return ret;
-        idx = symbol_table_iter_deref(&(p->cur_result->global_var),idx,&data,&name);
-    }
-    return 0;
+int pure_iter_deref( struct pure* p , int cursor , const char** key , struct pure_value** val ) {
+    assert(p->cur_result);
+    return symbol_table_iter_deref(&(p->cur_result->global_var),cursor,cast(void**,val),key);
 }
 
 void pure_value_new_num( struct pure* p , double n , struct pure_value* val ) {
