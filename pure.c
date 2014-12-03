@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdarg.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -2639,7 +2640,7 @@ const char* pure_last_error( struct pure* p , int* ec , int* line , int* pos ) {
     case PURE_EC_TOO_MANY_FUNCTION_PARAMETERS: return "Too many function parameters";
     case PURE_EC_NO_SUCH_FUNC: return "No such function";
     case PURE_EC_NO_SUCH_VALUE: return "No such value";
-    case PURE_EC_FUNCTION_EXECUTION_ERROR: return "The function execution has an error,check your register function for more message";
+    case PURE_EC_FUNCTION_EXECUTION_ERROR: return p->ex_err_str;
     case PURE_EC_UNKNOWN_CONSTANT_SYMBOL: return "Cannot parse the constant value you provide";
     case PURE_EC_UNKNOWN_UNARY_OPRAND: return "Unknown unary operand";
     case PURE_EC_ONLY_NUMBER_CAN_BE_FACTOR: return "Factor can only accept number";
@@ -3034,6 +3035,7 @@ struct pure* pure_create() {
     f->loc = 0;
     f->ec = PURE_EC_NO_ERROR;
     f->cur_result = NULL;
+    f->ex_err_str[0]=0;
 #ifndef NO_BUILT_IN_LIB
     lib_open(f);
 #endif /* NO_BUILT_IN_LIB */
@@ -3069,6 +3071,14 @@ void pure_reg_var( struct pure* p , const char* name , struct pure_value* val ) 
     }
 }
 
+void pure_print_error( struct pure* p, const char* fmt , ... ) {
+    va_list vl;
+    int sz;
+    va_start(vl,fmt);
+    sz = vsprintf(p->ex_err_str,fmt,vl);
+    assert( sz < 1024 );
+    p->ec = PURE_EC_FUNCTION_EXECUTION_ERROR;
+}
 
 int pure_run_file( struct pure* p , const char* file , const char** error , int* ec , int* line , int* pos  ) {
     FILE* f;
