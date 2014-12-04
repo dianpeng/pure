@@ -3089,6 +3089,7 @@ int pure_run_file( struct pure* p , const char* file , const char** error , int*
 
     if( f == NULL ) {
         p->ec = PURE_EC_NO_SUCH_FILE;
+        *error = pure_last_error(p,ec,line,pos);
         return -1;
     }
 
