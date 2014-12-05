@@ -1822,7 +1822,17 @@ int ctrl_foreach_arr( struct pure* f , char var[PURE_MAX_VARNAME] , struct pure_
             unref_val(f,arr);
             return -1;
         }
-        if( *ret_back || *brk ) {
+        if( *ret_back ) {
+            unref_val(f,arr);
+            return 0;
+        }
+        if( *brk ) {
+            if( skip_block(f) != 0 ) {
+                f->ec = PURE_EC_SYNTAX_ERROR;
+                unref_val(f,arr);
+                return -1;
+            }
+            *brk = 0;
             unref_val(f,arr);
             return 0;
         }
@@ -1891,7 +1901,20 @@ int ctrl_foreach_map( struct pure* f , char k_var[PURE_MAX_VARNAME] , char v_var
             return -1;
         }
 
-        if( *ret_back || *brk ) {
+        if( *ret_back ) {
+            unref_val(f,&pv_name);
+            unref_val(f,v);
+            return 0;
+        }
+
+        if( *brk ) {
+            if( skip_block(f) != 0 ) {
+                f->ec = PURE_EC_SYNTAX_ERROR;
+                unref_val(f,&pv_name);
+                unref_val(f,v);
+                return -1;
+            }
+            *brk = 0;
             unref_val(f,&pv_name);
             unref_val(f,v);
             return 0;
@@ -1937,7 +1960,15 @@ int ctrl_classic_for( struct pure* f , char var[PURE_MAX_VARNAME] , int64_t star
         if( exec_block(f,ret,ret_back,brk) != 0 ) {
             return -1;
         }
-        if( *ret_back || *brk ) {
+        if( *ret_back ) {
+            return 0;
+        }
+        if( *brk ) {
+            if( skip_block(f) != 0 ) {
+                f->ec = PURE_EC_SYNTAX_ERROR;
+                return -1;
+            }
+            *brk = 0;
             return 0;
         }
     }
@@ -2124,7 +2155,17 @@ int ctrl_loop( struct pure* f , struct pure_value* ret , int* ret_back , int* br
                 unref_val(f,&cond);
                 return -1;
             }
-            if( *ret_back || *brk ) {
+            if( *ret_back ) {
+                unref_val(f,&cond);
+                return 0;
+            }
+            if( *brk ) {
+                if( skip_block(f) != 0 ) {
+                    f->ec = PURE_EC_SYNTAX_ERROR;
+                    unref_val(f,&cond);
+                    return -1;
+                }
+                *brk = 0;
                 unref_val(f,&cond);
                 return 0;
             }
@@ -2408,6 +2449,7 @@ int interp_scope( struct pure* f , struct pure_value* val , int* ret , int* brk 
         *ret = 1;
         return ctrl_ret(f,val);
     case TK_BREAK:
+        *ret = 0;
         *brk = 1;
         next_tk(f,5);
         if(f->tk != TK_SEMICON) {
@@ -2531,8 +2573,11 @@ int skip_block( struct pure* f ) {
     double num;
     int tk;
 
-    assert(f->tk == TK_LBRA);
-    tk = next_tk(f,1);
+    /* optionally skip the { */
+    if( f->tk == TK_LBRA )
+        tk = next_tk(f,1);
+    else
+        tk = f->tk;
 
     while( recursive != 0 ) {
         switch(tk) {

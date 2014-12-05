@@ -1,0 +1,20 @@
+
+func FancyTest() {
+	for( k, 1 , 10 , 1 ) {
+		for( i , 1, 10 , 1 ) {
+			if( i == 5 )
+				break;
+			print(k,i);
+		}
+	}
+	
+	print("Done");
+}
+
+FancyTest();
+	
+
+
+
+
+
