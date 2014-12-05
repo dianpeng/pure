@@ -29,6 +29,8 @@ extern "C" {
 #define PURE_MAX_VARNAME 32 /* You should *make sure* that MAX_VARNAME <= MAX_LOCAL_BUF_SIZE */
 #define PURE_MAX_CALL_STACK 200 /* The max recursive function you may call */
 #define PURE_MAX_USER_MAP_SIZE 12
+#define PURE_MAX_NESTED_BLOCK 32
+#define PURE_MAX_SEQUENCE_BLOCK 16
 
 enum {
     PURE_EC_NO_ERROR,
@@ -62,7 +64,11 @@ enum {
     PURE_EC_UNKNOWN_MAP_KEY,
     PURE_EC_EXPECT_COLON,
     PURE_EC_EXPECT_COMMA,
-    PURE_EC_GLOBAL_SCOPE_SYNTAX_ERROR
+    PURE_EC_EXPECT_LBRA,
+    PURE_EC_EXPECT_RBRA,
+    PURE_EC_GLOBAL_SCOPE_SYNTAX_ERROR,
+    PURE_EC_TOO_MANY_NESTED_BLOCK,
+    PURE_EC_TOO_MANY_SEQUENCE_BLOCK
 };
 
 /* A simple open addressing hash table implementation. Only insertion/query support,
@@ -82,8 +88,6 @@ struct symbol_table {
     size_t sz;
     void* entry;
 };
-
-#define symbol_table_init(x,sz) memset((x),0,sizeof(struct symbol_table)*(sz))
 
 #define cast(t,v) ((t)(v))
 
@@ -481,6 +485,7 @@ struct pure_c_func {
 struct pure_user_func {
     size_t loc; /* location in source */
     char par_name[PURE_MAX_LOCAL_VAR][PURE_MAX_VARNAME];
+    int jmp_tb[PURE_MAX_NESTED_BLOCK][PURE_MAX_SEQUENCE_BLOCK];
     size_t par_sz;
 };
 
@@ -488,7 +493,14 @@ struct pure_user_func {
     do { \
         (c)->loc = 0; \
         (c)->par_sz = 0; \
+        memset((c)->jmp_tb,0,sizeof((c)->jmp_tb)); \
     } while(0)
+
+/* Stack */
+struct pure_exec_stk {
+    struct symbol_table local_var;
+    size_t cur_jmp_x;
+};
 
 struct pure_result {
     struct symbol_table user_func;
@@ -497,9 +509,11 @@ struct pure_result {
                                         * then this pointer will pointed to the specific position, otherwise
                                         * it is set to NULL pointer */
     struct slab sv_slab;
-    struct symbol_table stk[PURE_MAX_CALL_STACK];
+    struct pure_exec_stk stk[PURE_MAX_CALL_STACK];
     size_t cur_stk;
 };
+
+#define current_stack(p) ((p)->cur_result->stk+(p)->cur_result->cur_stk)
 
 static
 struct pure_result* pure_result_create() {
@@ -509,9 +523,9 @@ struct pure_result* pure_result_create() {
     r->cur_ufunc = NULL;
     slab_create(&(r->sv_slab),sizeof(struct pure_shared_value),PURE_MAX_VALUE_SLAB);
     r->cur_stk = 0;
-    symbol_table_init(r->stk,PURE_MAX_CALL_STACK);
+    memset(r->stk,0,sizeof(r->stk));
     /* initialize the first stack frame */
-    symbol_table_create(r->stk,PURE_MAX_LOCAL_VAR,sizeof(struct pure_value));
+    symbol_table_create(&(r->stk->local_var),PURE_MAX_LOCAL_VAR,sizeof(struct pure_value));
     return r;
 }
 
@@ -523,7 +537,7 @@ void pure_result_delete( struct pure_result* p ) {
     symbol_table_delete(&(p->user_func));
     symbol_table_delete(&(p->global_var));
     for( i = 0 ; i  < PURE_MAX_CALL_STACK ; ++i ) {
-        symbol_table_delete(p->stk+i);
+        symbol_table_delete(&(p->stk+i)->local_var);
     }
     free(p);
 }
@@ -890,11 +904,15 @@ int interp_scope( struct pure* f , struct pure_value* val , int* ret , int* brk 
 static
 int interp_global( struct pure* f );
 static
-int exec_block( struct pure* f , struct pure_value* val , int* ret , int* brk );
+int exec_nested_block( struct pure* f , struct pure_value* val , int* ret , int* brk );
 static
-int skip_block( struct pure* f );
+int exec_seq_block( struct pure* f, struct pure_value* val , int* ret , int* brk , int yidx );
 static
-int skip_line( struct pure* f );
+void skip_nested_block( struct pure* f );
+static
+void skip_seq_block( struct pure* f , int yidx );
+static
+int dev_block( struct pure* f , struct pure_user_func* ufunc );
 
 static
 int invoke_user_func( struct pure* f , struct pure_user_func* ufunc , const struct pure_value* par , size_t sz , struct pure_value* result ) {
@@ -911,17 +929,16 @@ int invoke_user_func( struct pure* f , struct pure_user_func* ufunc , const stru
 
     f->cur_result->cur_ufunc = ufunc; /* set the current user function */
     set_pc(f,ufunc->loc);
+    /* Increase the stack pointer*/
+    f->cur_result->cur_stk++;
+    stk = &(current_stack(f)->local_var);
+    symbol_table_resume(stk,PURE_MAX_LOCAL_VAR,sizeof(struct pure_value));
 
     /* Set up the stack */
     if(f->cur_result->cur_stk == PURE_MAX_CALL_STACK) {
         f->ec = PURE_EC_STACK_OVERFLOW;
         return -1;
     }
-
-    /* Increase the stack pointer*/
-    f->cur_result->cur_stk++;
-    stk = f->cur_result->stk + f->cur_result->cur_stk;
-    symbol_table_resume(stk,PURE_MAX_LOCAL_VAR,sizeof(struct pure_value));
 
     /* Push all the parameter on the local variable look up table (stack) */
     for( i = 0 ; i < sz ; ++i ) {
@@ -935,13 +952,14 @@ int invoke_user_func( struct pure* f , struct pure_user_func* ufunc , const stru
         par_val[i] = slot;
     }
 
-    ret = exec_block(f,result,&is_ret,&is_brk);
+    ret = exec_nested_block(f,result,&is_ret,&is_brk);
     
     /* Clear all the parameters */
     for( i = 0 ; i < sz ; ++i ) {
         unref_val(f,par_val[i]);
     }
     symbol_table_clean(stk);
+    current_stack(f)->cur_jmp_x =0;
 
     /* Decrease the stack pointer */
     assert(f->cur_result->cur_stk !=0);
@@ -979,7 +997,7 @@ static
 void lookup_var( struct pure* f , const char var[PURE_MAX_VARNAME] , struct pure_value* ret ) {
     const struct pure_value* val = NULL;
     if( f->cur_result != NULL && f->cur_result->cur_ufunc != NULL ) {
-        val = symbol_table_query(f->cur_result->stk+(f->cur_result->cur_stk),var);
+        val = symbol_table_query(&(current_stack(f)->local_var),var);
     } 
     if( val == NULL ) {
         if(f->cur_result != NULL )
@@ -1001,7 +1019,7 @@ int update_var( struct pure* f , const char var[PURE_MAX_VARNAME] , const struct
     struct pure_value* slot = NULL;
     int insert;
     if( f->cur_result != NULL && f->cur_result->cur_ufunc != NULL ) {
-        slot = symbol_table_insert(f->cur_result->stk+(f->cur_result->cur_stk),var,&insert);
+        slot = symbol_table_insert(&(current_stack(f)->local_var),var,&insert);
     }
     if( slot == NULL ) {
         if( f->cur_result != NULL )
@@ -1818,20 +1836,11 @@ int ctrl_foreach_arr( struct pure* f , char var[PURE_MAX_VARNAME] , struct pure_
         *ret_back = is_ret;
         *brk = is_brk;
 
-        if( exec_block(f,ret,ret_back,brk) != 0 ) {
+        if( exec_nested_block(f,ret,ret_back,brk) != 0 ) {
             unref_val(f,arr);
             return -1;
         }
-        if( *ret_back ) {
-            unref_val(f,arr);
-            return 0;
-        }
-        if( *brk ) {
-            if( skip_block(f) != 0 ) {
-                f->ec = PURE_EC_SYNTAX_ERROR;
-                unref_val(f,arr);
-                return -1;
-            }
+        if( *ret_back || *brk ) {
             *brk = 0;
             unref_val(f,arr);
             return 0;
@@ -1841,11 +1850,8 @@ int ctrl_foreach_arr( struct pure* f , char var[PURE_MAX_VARNAME] , struct pure_
     if(!exec) {
         /* if the loop body haven't been executed the current loc of pure is still
          * pointed to the beginning of the code block, we need to skip this block */
-        if( f->tk != TK_LBRA || skip_block(f) != 0 ) {
-            f->ec = PURE_EC_SYNTAX_ERROR;
-            unref_val(f,arr);
-            return -1;
-        }
+        skip_nested_block(f);
+        unref_val(f,arr);
     }
 
     unref_val(f,arr);
@@ -1895,31 +1901,18 @@ int ctrl_foreach_map( struct pure* f , char k_var[PURE_MAX_VARNAME] , char v_var
         update_var(f,k_var,&pv_name);
         update_var(f,v_var,v);
         /* Call the user callback function */
-        if( exec_block(f,ret,ret_back,brk) != 0 ) {
+        if( exec_nested_block(f,ret,ret_back,brk) != 0 ) {
             unref_val(f,&pv_name);
             unref_val(f,v);
             return -1;
         }
 
-        if( *ret_back ) {
-            unref_val(f,&pv_name);
-            unref_val(f,v);
-            return 0;
-        }
-
-        if( *brk ) {
-            if( skip_block(f) != 0 ) {
-                f->ec = PURE_EC_SYNTAX_ERROR;
-                unref_val(f,&pv_name);
-                unref_val(f,v);
-                return -1;
-            }
+        if( *ret_back || *brk ) {
             *brk = 0;
             unref_val(f,&pv_name);
             unref_val(f,v);
             return 0;
         }
-
         /* move forward the cursor */
         cursor = symbol_table_iter_deref(a,cursor,cast(void**,&v),&n);
     }
@@ -1927,12 +1920,8 @@ int ctrl_foreach_map( struct pure* f , char k_var[PURE_MAX_VARNAME] , char v_var
     if(!exec) {
         /* if the loop body haven't been executed the current loc of pure is still
          * pointed to the beginning of the code block, we need to skip this block */
-        if( f->tk != TK_LBRA || skip_block(f) != 0 ) {
-            f->ec = PURE_EC_SYNTAX_ERROR;
-            unref_val(f,&pv_name);
-            unref_val(f,v);
-            return -1;
-        }
+        skip_nested_block(f);
+        unref_val(f,&pv_name);
     }
 
     return 0;
@@ -1957,29 +1946,17 @@ int ctrl_classic_for( struct pure* f , char var[PURE_MAX_VARNAME] , int64_t star
         *ret_back = is_ret;
         *brk = is_brk;
 
-        if( exec_block(f,ret,ret_back,brk) != 0 ) {
+        if( exec_nested_block(f,ret,ret_back,brk) != 0 ) {
             return -1;
         }
-        if( *ret_back ) {
-            return 0;
-        }
-        if( *brk ) {
-            if( skip_block(f) != 0 ) {
-                f->ec = PURE_EC_SYNTAX_ERROR;
-                return -1;
-            }
+        if( *ret_back || *brk ) {
             *brk = 0;
             return 0;
         }
     }
 
     if(!exec) {
-        /* if the loop body haven't been executed the current loc of pure is still
-         * pointed to the beginning of the code block, we need to skip this block */
-        if( f->tk != TK_LBRA || skip_block(f) != 0 ) {
-            f->ec = PURE_EC_SYNTAX_ERROR;
-            return -1;
-        }
+        skip_nested_block(f);
     }
 
     return 0;
@@ -2142,7 +2119,7 @@ int ctrl_loop( struct pure* f , struct pure_value* ret , int* ret_back , int* br
 
         /* Just check the { and left it to the exec_block */
         if( f->tk != TK_LBRA ) {
-            f->ec = PURE_EC_SYNTAX_ERROR;
+            f->ec = PURE_EC_EXPECT_LBRA;
             return -1;
         }
 
@@ -2151,30 +2128,17 @@ int ctrl_loop( struct pure* f , struct pure_value* ret , int* ret_back , int* br
             *ret_back = is_ret;
             *brk = is_brk;
 
-            if( exec_block(f,ret,ret_back,brk) != 0 ) {
+            if( exec_nested_block(f,ret,ret_back,brk) != 0 ) {
                 unref_val(f,&cond);
                 return -1;
             }
-            if( *ret_back ) {
-                unref_val(f,&cond);
-                return 0;
-            }
-            if( *brk ) {
-                if( skip_block(f) != 0 ) {
-                    f->ec = PURE_EC_SYNTAX_ERROR;
-                    unref_val(f,&cond);
-                    return -1;
-                }
+            if( *ret_back || *brk ) {
                 *brk = 0;
                 unref_val(f,&cond);
                 return 0;
             }
         } else {
-            if( skip_block(f) != 0 ) {
-                f->ec = PURE_EC_SYNTAX_ERROR;
-                return -1;
-            }
-
+            skip_nested_block(f);
             *brk = *ret_back = 0;
             unref_val(f,&cond);
             return 0;
@@ -2197,6 +2161,7 @@ int ctrl_cond( struct pure* f , struct pure_value* ret , int* ret_back , int* br
     struct pure_value cond;
     int is_ret = *ret_back;
     int is_brk = *brk;
+    int yidx = 0;
 
     pure_value_invalid(&cond);
     assert(f->tk == TK_IF);
@@ -2217,34 +2182,28 @@ int ctrl_cond( struct pure* f , struct pure_value* ret , int* ret_back , int* br
         return -1;
     }
     next_tk(f,1);
-
-    
-#define DO(name,skip) \
-    do { \
-        if( to_boolean(&cond) ) { \
-        exec = 1; \
-        if( name(f,ret,ret_back,brk) != 0 ) { \
-            unref_val(f,&cond); \
-            return -1; \
-        } \
-        unref_val(f,&cond); /* clear cond */ \
-        if(*brk || *ret_back) { \
-            return 0; \
-        } \
-        } else { \
-            *brk = *ret_back = 0; \
-            if( skip(f) != 0 ) { \
-                return -1; \
-            } \
-        } \
-    }while(0)
-
-    if(f->tk == TK_LBRA) {
-        DO(exec_block,skip_block);
-    } else {
-        DO(interp_scope,skip_line);
+    /* check if we have { */
+    if( f->tk != TK_LBRA ) {
+        f->ec = PURE_EC_EXPECT_LBRA;
+        unref_val(f,&cond);
+        return -1;
     }
 
+    if( to_boolean(&cond) ) {
+        exec = 1;
+        if( exec_seq_block(f,ret,ret_back,brk,yidx) != 0 ) {
+            unref_val(f,&cond);
+            return -1;
+        }
+        unref_val(f,&cond);
+        if( *ret_back || *brk ) {
+            goto done;
+        }
+    } else {
+        *brk = *ret_back = 0;
+        skip_seq_block(f,yidx);
+    }
+    ++yidx;
     /* Check if we have any else/elif */
     do {
         switch(f->tk) {
@@ -2264,59 +2223,56 @@ int ctrl_cond( struct pure* f , struct pure_value* ret , int* ret_back , int* br
             }
             next_tk(f,1);
 
-            if(f->tk == TK_LBRA) {
-                DO(exec_block,skip_block);
-            } else {
-                DO(interp_scope,skip_line);
+            if( f->tk != TK_LBRA ) {
+                f->ec = PURE_EC_EXPECT_LBRA;
+                unref_val(f,&cond);
+                return -1;
             }
 
+            if( to_boolean(&cond) ) {
+                exec = 1;
+                if( exec_seq_block(f,ret,ret_back,brk,yidx) != 0 ) {
+                    unref_val(f,&cond);
+                    return -1;
+                }
+                unref_val(f,&cond);
+                if( *ret_back || *brk ) {
+                    goto done;
+                }
+            } else {
+                *brk = *ret_back = 0;
+                skip_seq_block(f,yidx);
+            }
+            ++yidx;
             break;
         case TK_ELSE:
             next_tk(f,4); /* else */
-            if(f->tk == TK_LBRA) {
-                if(!exec) {
-                    *ret_back = is_ret;
-                    *brk = is_brk;
-
-                    if( exec_block(f,ret,ret_back,brk) != 0 ) {
-                        return -1;
-                    }
-                    if(*brk || *ret_back) {
-                        return 0;
-                    }
-                } else {
-                    *brk = *ret_back = 0;
-                    if( skip_block(f) != 0 ) {
-                        f->ec = PURE_EC_SYNTAX_ERROR;
-                        return -1;
-                    }
+            if( f->tk != TK_LBRA ) {
+                f->ec = PURE_EC_EXPECT_LBRA;
+                return -1;
+            }
+            if(!exec) {
+                *ret_back = is_ret;
+                *brk = is_brk;
+                if( exec_seq_block(f,ret,ret_back,brk,yidx) != 0 ) {
+                    return -1;
+                }
+                if( *ret_back || *brk ) {
+                    goto done;
                 }
             } else {
-                if(!exec) {
-                    *ret_back = is_ret;
-                    *brk = is_brk;
-
-                    if( interp_scope(f,ret,ret_back,brk) != 0 ) {
-                        return -1;
-                    }
-                    if(*brk || *ret_back) {
-                        return 0;
-                    }
-                } else {
-                    *brk = *ret_back = 0;
-                    if( skip_line(f) != 0 ) {
-                        return -1;
-                    }
-                }
+                *brk = *ret_back = 0;
+                skip_seq_block(f,yidx);
             }
-            return 0;
-        default: return 0;
+            ++yidx;
+            goto done;
+        default: goto done;
         }
     } while(1);
 
+done:
     return 0;
 }
-#undef DO
 
 /* ret
  * 1. ret expression;
@@ -2412,8 +2368,7 @@ done:
     }
     func->loc = f->loc;
     /* Skip to the } and resume the code */
-    if( skip_block(f) != 0 ) {
-        f->ec = PURE_EC_SYNTAX_ERROR;
+    if( dev_block(f,func) != 0 ) {
         return -1;
     }
     return 0;
@@ -2463,115 +2418,95 @@ int interp_scope( struct pure* f , struct pure_value* val , int* ret , int* brk 
 }
 
 static
-int exec_block( struct pure* f , struct pure_value* val , int* ret , int* brk ) {
+int exec_nested_block( struct pure* f , struct pure_value* val , int* ret , int* brk ) {
     /* Execute the code until we reach a } */
     int is_ret = *ret;
     int is_brk = *brk;
     assert(f->tk == TK_LBRA);
     next_tk(f,1);
+    /* increase the cur jmp position */
+    ++(current_stack(f)->cur_jmp_x);
     do {
         if( interp_scope(f,val,ret,brk) != 0 )
             return -1;
         /* We stop the execution when we meet the return/break */
-        if( is_ret && *ret )
+        if( is_ret && *ret ) {
+            --(current_stack(f)->cur_jmp_x);
             return 0;
-        if( is_brk && *brk )
+        }
+        if( is_brk && *brk ) {
+            /* now we have a break operations , so we need to skip the
+             * current block */
+            set_pc(f,f->cur_result->cur_ufunc->jmp_tb[current_stack(f)->cur_jmp_x][0]);
             return 0;
+        }
     } while(f->tk != TK_RBRA);
     next_tk(f,1);
+    --(current_stack(f)->cur_jmp_x);
     return 0;
 }
 
 static
-int skip_line( struct pure* f ) {
-    char buf[PURE_MAX_LOCAL_BUF_SIZE];
-    const char* s;
-    int offset;
-    double num;
-    int tk = next_tk(f,0);
+int exec_seq_block( struct pure* f, struct pure_value* val , int* ret , int* brk , int yidx ) {
+    /* Execute the code until we reach a } */
+    int is_ret = *ret;
+    int is_brk = *brk;
+    assert(f->tk == TK_LBRA);
+    next_tk(f,1);
+    ++(current_stack(f)->cur_jmp_x);
+    /* increase the cur jmp position */
     do {
-        switch(tk) {
-        case TK_EOF:
+        if( interp_scope(f,val,ret,brk) != 0 )
             return -1;
-        case TK_STR:
-            s = str(f,&offset,buf);
-            if(s == NULL)
-                return -1;
-            if(s != buf)
-                free(cast(void*,s));
-            tk = next_tk(f,offset);
-            break;
-        case TK_NUM:
-            if((offset=number(f,&num)) <=0)
-                return -1;
-            tk = next_tk(f,offset);
-            break;
-        case TK_VAR:
-            if((offset=variable(f,buf)) <=0)
-                return -1;
-            tk = next_tk(f,offset);
-            break;
-        case TK_LBRA:
-            tk = next_tk(f,1);
-            break;
-        case TK_RBRA:
-            tk = next_tk(f,1);
-            break;
-        case TK_SEMICON:
-            tk = next_tk(f,1);
+        /* We stop the execution when we meet the return/break */
+        if( is_ret && *ret ) {
+            --(current_stack(f)->cur_jmp_x);
             return 0;
-
-    #define DO(t,o) \
-        case t: \
-        tk = next_tk(f,o); \
-        break
-
-            DO(TK_EQ,2);
-            DO(TK_NEQ,2);
-            DO(TK_LT,1);
-            DO(TK_LET,2);
-            DO(TK_GT,1);
-            DO(TK_GET,2);
-            DO(TK_NOT,1);
-            DO(TK_OR,2);
-            DO(TK_AND,2);
-            DO(TK_LSQR,1);
-            DO(TK_RSQR,1);
-            DO(TK_LPAR,1);
-            DO(TK_RPAR,1);
-            DO(TK_ADD,1);
-            DO(TK_SUB,1);
-            DO(TK_MUL,1);
-            DO(TK_DIV,1);
-            DO(TK_NIL,3);
-            DO(TK_BREAK,5);
-            DO(TK_COMMA,1);
-            DO(TK_IF,2);
-            DO(TK_ELIF,4);
-            DO(TK_ELSE,4);
-            DO(TK_FOR,3);
-            DO(TK_LOOP,4);
-            DO(TK_RET,6);
-            DO(TK_FUNC,4);
-            DO(TK_ASSIGN,1);
-            DO(TK_COLON,1);
-            DO(TK_MOD,1);
-
-    #undef DO
-        default: assert(0); return -1;
         }
-    } while(1);
+        if( is_brk && *brk ) {
+            --(current_stack(f)->cur_jmp_x);
+            /* now we have a break operations , so we need to skip the
+             * current block */
+            set_pc(f,f->cur_result->cur_ufunc->jmp_tb[current_stack(f)->cur_jmp_x-1][yidx]);
+            return 0;
+        }
+    } while(f->tk != TK_RBRA);
+    next_tk(f,1);
+    --(current_stack(f)->cur_jmp_x);
     return 0;
 }
 
 static
-int skip_block( struct pure* f ) {
-    int recursive = 1;
+void skip_nested_block( struct pure* f ) {
+    set_pc(f,f->cur_result->cur_ufunc->jmp_tb[current_stack(f)->cur_jmp_x][0]);
+}
+
+static
+void skip_seq_block( struct pure* f , int yidx ) {
+    set_pc(f,f->cur_result->cur_ufunc->jmp_tb[current_stack(f)->cur_jmp_x][yidx]);
+    assert(f->loc !=0);
+}
+
+static
+int dev_block_single( struct pure* f , struct pure_user_func* ufunc , int x , int y ) {
+    int cur_x = x+1;
+    int cur_y = 0;
+
     char buf[PURE_MAX_LOCAL_BUF_SIZE];
     const char* s;
     int offset;
     double num;
     int tk;
+
+    if( x+1 == PURE_MAX_NESTED_BLOCK ) {
+        f->ec = PURE_EC_TOO_MANY_NESTED_BLOCK;
+        return -1;
+    }
+
+    if( y == PURE_MAX_SEQUENCE_BLOCK ) {
+        f->ec = PURE_EC_TOO_MANY_SEQUENCE_BLOCK;
+        return -1;
+    }
 
     /* optionally skip the { */
     if( f->tk == TK_LBRA )
@@ -2579,37 +2514,45 @@ int skip_block( struct pure* f ) {
     else
         tk = f->tk;
 
-    while( recursive != 0 ) {
+    while(cur_x != x) {
         switch(tk) {
         case TK_EOF:
             return -1;
         case TK_STR:
             s = str(f,&offset,buf);
-            if(s == NULL)
+            if(s == NULL) {
+                f->ec = PURE_EC_UNKNOWN_STRING_LITERAL;
                 return -1;
+            }
             if(s != buf)
                 free(cast(void*,s));
             tk = next_tk(f,offset);
             break;
         case TK_NUM:
-            if((offset=number(f,&num)) <=0)
+            if((offset=number(f,&num)) <=0) {
+                f->ec = PURE_EC_UNKNOWN_NUMBER;
                 return -1;
+            }
             tk = next_tk(f,offset);
             break;
         case TK_VAR:
-            if((offset=variable(f,buf)) <=0)
+            if((offset=variable(f,buf)) <=0) {
+                f->ec = PURE_EC_UNKNOWN_CONSTANT_SYMBOL;
                 return -1;
+            }
             tk = next_tk(f,offset);
             break;
         case TK_LBRA:
-            ++recursive;
-            tk = next_tk(f,1);
+            /* now let's recursively calls into ourself */
+            if( dev_block_single(f,ufunc,cur_x,cur_y) !=0 )
+                return -1;
+            ++cur_y;
+            tk = f->tk;
             break;
         case TK_RBRA:
-            --recursive;
-            tk = next_tk(f,1);
+            --cur_x;
+            assert( cur_x == x );
             break;
-
 #define DO(t,o) \
         case t: \
         tk = next_tk(f,o); \
@@ -2651,7 +2594,15 @@ int skip_block( struct pure* f ) {
         default: return -1;
         }
     }
+    assert(f->tk == TK_RBRA);
+    next_tk(f,1);
+    ufunc->jmp_tb[x][y] = f->loc;
     return 0;
+}
+
+static
+int dev_block( struct pure* f , struct pure_user_func* ufunc ) {
+    return dev_block_single(f,ufunc,0,0);
 }
 
 static
@@ -2713,6 +2664,10 @@ const char* pure_last_error( struct pure* p , int* ec , int* line , int* pos ) {
     case PURE_EC_EXPECT_COMMA: return "Expect ,";
     case PURE_EC_GLOBAL_SCOPE_SYNTAX_ERROR: return "Global scope syntax error, only assignment/function call/function definition is allowed";
     case PURE_EC_UNKNOWN_LEFT_HANDSIDE_VALUE: return "Left hand side value must be variable,array/map index";
+    case PURE_EC_EXPECT_LBRA: return "Expect {";
+    case PURE_EC_EXPECT_RBRA: return "Expect }";
+    case PURE_EC_TOO_MANY_NESTED_BLOCK: return "Too many nested block";
+    case PURE_EC_TOO_MANY_SEQUENCE_BLOCK: return "Too many sequence block";
     default: return "";
     }
 }
@@ -3766,133 +3721,6 @@ void test_assignment() {
 
 }
 
-void test_parser_for() {
-    {
-        char str[] = "for(i,1,10,1){ i=i+1*9*i;printf(i*i+1989); }";
-        struct pure* p = pure_create();
-        struct pure_value ret;
-        int is_ret,is_brk;
-
-        p->cur_result = pure_result_create();
-        p->loc = 0;
-        p->data = str;
-
-        pure_reg_func(p,"printf",printf_cb,NULL);
-        next_tk(p,0);
-
-        assert( ctrl_for(p,&ret,&is_ret,&is_brk) == 0 );
-        assert(is_ret == 0);
-        assert(is_brk == 0);
-        printf("================================\n");
-    }
-
-    {
-        char str[] = "for(i,[1,2,3,4,5,6,7,8,9]){ i=i+1*9*i;printf(i*i+1989); }";
-        struct pure* p = pure_create();
-        struct pure_value ret;
-        int is_ret,is_brk;
-
-        p->cur_result = pure_result_create();
-        p->loc = 0;
-        p->data = str;
-        
-        pure_reg_func(p,"printf",printf_cb,NULL);
-        next_tk(p,0);
-
-        assert( ctrl_for(p,&ret,&is_ret,&is_brk) == 0 );
-        assert(is_ret == 0);
-        assert(is_brk == 0);
-        printf("================================\n");
-    }
-
-}
-
-void test_parser_loop() {
-    {
-        char str[] = "i=10;loop(i){ if( i == 5 ) { break ; } printf(i); i = i -1; }";
-        struct pure* p = pure_create();
-        struct pure_value ret;
-        int is_ret = 0;
-        int is_brk = 1;
-
-        p->cur_result = pure_result_create();
-        p->loc = 0;
-        p->data = str;
-
-        pure_reg_func(p,"printf",printf_cb,NULL);
-        next_tk(p,0);
-        assert( assign_or_call_fn(p) == 0 );
-        assert( ctrl_loop(p,&ret,&is_ret,&is_brk) == 0 );
-        assert(is_ret == 0);
-        assert(is_brk == 1);
-        printf("================================\n");
-    }
-}
-
-void test_parser_cond() {
-    {
-        char str[] = "i=1;" \
-            "if(i==1) {" \
-            "printf(i);" \
-            "i=i-1;}" \
-            "elif(i==0){" \
-            "printf(i);" \
-            "i=2;}printf(i);";
-        struct pure* p = pure_create();
-        struct pure_value ret;
-        int is_brk,is_ret;
-
-        p->cur_result = pure_result_create();
-
-        p->data = str;
-        p->loc= 0;
-        next_tk(p,0);
-        pure_reg_func(p,"printf",printf_cb,NULL);
-
-        assert( assign_or_call_fn(p) == 0 );
-        assert( ctrl_cond(p,&ret,&is_ret,&is_brk) == 0 );
-        assert( assign_or_call_fn(p) == 0 );
-
-    }
-}
-
-void test_parser_func() {
-    {
-        char str[] = "func myfunc(i) {" \
-            "printf(i);}for(i,[1,2,3,4,5]){ myfunc(i); }";
-        struct pure* p = pure_create();
-        struct pure_value ret;
-        int is_brk=1,is_ret=0;
-
-        p->cur_result = pure_result_create();
-        pure_reg_func(p,"printf",printf_cb,NULL);
-
-        p->data = str;
-        p->loc= 0;
-        next_tk(p,0);
-
-        assert( def_fn(p) == 0 );
-        assert( ctrl_for(p,&ret,&is_ret,&is_brk) == 0 );
-    }
-    {
-        char str[] = "func myfunc(i) {" \
-            "if( i == 10 ) return; else {" \
-            "printf(i); i = i+1; myfunc(i); }}myfunc(1);";
-
-        struct pure* p = pure_create();
-        int is_brk=1,is_ret=0;
-
-        p->cur_result = pure_result_create();
-        pure_reg_func(p,"printf",printf_cb,NULL);
-
-        p->data = str;
-        p->loc= 0;
-        next_tk(p,0);
-
-        assert( def_fn(p) == 0 );
-        assert( assign_or_call_fn(p) == 0 );
-    }
-}
 
 void test_run_str() {
     {
@@ -3900,7 +3728,7 @@ void test_run_str() {
         const char* err;
         char str[] = \
             "a=1;" \
-            "func fib(i) { if(i==0) return 0; elif(i==1) return 1; else return fib(i-1)+fib(i-2); }" \
+            "func fib(i) { if(i==0) { return 0; } elif(i==1) { return 1; } else { return fib(i-1)+fib(i-2); } }" \
             "b = fib(22); " \
             "printf(b);printf(a);";
 
@@ -4029,11 +3857,11 @@ void test_2() {
         int ec,line,pos;
         const char* err;
         char str[] = "func IsOdd(num) { \
-            if( num % 2 == 0 )  \
+            if( num % 2 == 0 )  {\
                 return 0; \
-            else \
+            } else {\
                 return 1; \
-            } \
+            }} \
             func FilterOutOdd(arr) { \
                 ret = []; \
                 for( i , arr ) { \
@@ -4075,10 +3903,6 @@ int main() {
     test_parser_expr();
     test_parser_array();
     test_assignment();
-    test_parser_for();
-    test_parser_loop();
-    test_parser_cond();
-    test_parser_func();
     test_run_str();
     test_map_index();
     test_array_foreach();
@@ -4117,7 +3941,7 @@ int fib(int i) {
 void performance() {
     int ec,line,pos;
     const char* err;
-    char str[] = "func fib(i) { if(i==0) return 0; elif(i==1) return 1; else return fib(i-1)+fib(i-2); } printf(fib(30));";
+    char str[] = "func fib(i) { if(i==0) { return 0; } elif(i==1) { return 1; } else { return fib(i-1)+fib(i-2); } } printf(fib(35));";
     struct pure* p = pure_create();
     clock_t start;
     pure_reg_func(p,"printf",printf_cb,NULL);
