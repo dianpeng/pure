@@ -33,10 +33,11 @@ for different program to describe its configuration data.
 ```
 # Test if the input value is a number or not
 func IsOdd(num) {
-	if( num % 2 == 0 ) 
+	if( num % 2 == 0 ) {
 		return 0;
-	else
+	} else {
 		return 1;
+	}
 }
 
 # Filter out the odd number in the array
