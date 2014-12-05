@@ -16,7 +16,7 @@ func ExportAppMenu() {
 		return _AppMenuEntry;
 	} else {
 		# delete the Register element in the array
-		arr_del(_AppMenuEntry,size(_AppMenuEntry)-1);
+		_AppMenuEntry[size(_AppMenuEntry)-1] = nil;
 		# return the menu entry
 		return _AppMenuEntry;
 	}
@@ -24,12 +24,13 @@ func ExportAppMenu() {
 
 func ExportSubMenu() {
 	_AppSubMenu={ 
-	"File":["Open","Save","SaveAs","Exit"] ,
-	"Edit":["Find","Replace","FindAndReplace"],
-	"Display":["Wide Screen","Full Screen","Windowed"],
-	"Help":["Online","Usage","Topic","FAQ"],
-	"About":["Author","CopyRight"],
-	"Register":["Buy it online","Request free version"]
+		"File":["Open","Save","SaveAs","Exit"] ,
+		"Edit":["Find","Replace","FindAndReplace"],
+		"Display":["Wide Screen","Full Screen","Windowed"],
+		"Help":["Online","Usage","Topic","FAQ"],
+		"About":["Author","CopyRight"],
+		"Register":["Buy it online","Request free version"],
+		to_str(1234):["1234"]
 	};
 	if( NotRegistered ) {
 		return _AppSubMenu;

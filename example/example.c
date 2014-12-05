@@ -12,7 +12,7 @@ int run_example123() {
     int ec;
     const char* str;
 
-    if( pure_run_file(p,example1,&str,&ec,&line,&pos) !=0 ) {
+    if( pure_run_file(p,example3,&str,&ec,&line,&pos) !=0 ) {
         fprintf(stderr,"Error in script:%s at location:(%d:%d)",str,line,pos);
         return -1;
     }
@@ -129,6 +129,6 @@ int run_example4() {
 
 int main() {
     printf("From host program!");
-    run_example4();
+    run_example123();
     return 0;
 }
