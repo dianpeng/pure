@@ -18,7 +18,7 @@ extern "C" {
 #define STRDUP strdup
 #endif /* _WIN32 */
 
-#define PURE_MAX_VALUE_SLAB 256
+#define PURE_MAX_VALUE_SLAB 4
 #define PURE_MAX_CALLBACK 128
 #define PURE_MAX_CTX_VAR 64
 #define PURE_MAX_USER_FUNC 16
@@ -130,8 +130,8 @@ struct symbol_entry* symbol_table_insert_slot( struct symbol_table* tb , const c
                 return ent;
             } else {
                 uint32_t h = hs;
-                for( ; symbol_table_entry(tb,(++h & (tb->cap-1)))->mem == NULL ; );
-                ent = symbol_table_entry(tb,(++h & (tb->cap-1)));
+                for( ; symbol_table_entry(tb,(++h & (tb->cap-1)))->mem != NULL ; );
+                ent = symbol_table_entry(tb,(h & (tb->cap-1)));
                 tmp->next = ent;
                 *insert = 1;
                 goto done;
@@ -275,9 +275,13 @@ static
 int symbol_table_iter_deref( struct symbol_table* tb , int idx, void** data , const char** name ) {
     assert( symbol_table_iter_has_next(tb,idx) );
     for( ; symbol_table_entry(tb,idx)->mem == NULL && cast(size_t,idx) < (tb->cap) ; ++idx );
-    *data = symbol_table_entry(tb,idx)->mem;
-    *name = symbol_table_entry(tb,idx)->key;
-    return idx == (tb->cap)-1 ? idx = (tb->cap)+1 : idx+1;
+    if( cast(size_t,idx) < tb->cap ) {
+        *data = symbol_table_entry(tb,idx)->mem;
+        *name = symbol_table_entry(tb,idx)->key;
+    } else {
+        *data = NULL;
+    }
+    return idx == (tb->cap) ? idx = (tb->cap)+1 : idx+1;
 }
 
 /* =============================
@@ -361,6 +365,7 @@ void* slab_malloc( struct slab* slb ) {
 
 static
 void slab_free( struct slab* slb , void* ptr ) {
+    assert(ptr != NULL);
     cast(struct header*,ptr)->next = cast(struct header*,slb->cur);
     slb->cur = ptr;
 }
@@ -560,9 +565,13 @@ enum {
     TK_COMMA,TK_IF,TK_ELIF,TK_ELSE,TK_FOR,TK_LOOP,TK_FUNC,TK_RET,TK_UNKNOWN,TK_COMMENT
 };
 
-
+#ifndef NDEBUG
+#define malloc_shared_value(f) malloc(sizeof(struct pure_shared_value))
+#define free_shared_value(f,ptr) do { free(ptr); ptr = NULL; } while(0)
+#else
 #define malloc_shared_value(f) slab_malloc(&((f)->cur_result->sv_slab))
 #define free_shared_value(f,ptr) slab_free(&((f)->cur_result->sv_slab),ptr)
+#endif /* NDEBUG */
 
 static
 int expect_tk( struct pure * f , int tk ) {
@@ -681,28 +690,33 @@ void unref_val( struct pure* f , struct pure_value* v ) {
                 }
                 v->type = PURE_INVALID;
                 free_shared_value(f,v->value.shared_val);
+                v->value.shared_val = NULL;
                 break;
             case PURE_ARRAY:
                 pure_array_delete(f,&(shared_value(v)->value.arr));
                 v->type = PURE_INVALID;
                 free_shared_value(f,v->value.shared_val);
+                v->value.shared_val = NULL;
                 break;
             case PURE_MAP:
                 symbol_table_delete(&(shared_value(v)->value.map));
                 v->type = PURE_INVALID;
                 free_shared_value(f,v->value.shared_val);
+                v->value.shared_val = NULL;
                 break;
             case PURE_USER_DATA:
                 if( shared_value(v)->value.user_data.clean_cb )
                     shared_value(v)->value.user_data.clean_cb(shared_value(v)->value.user_data.data);
                 v->type = PURE_INVALID;
                 free_shared_value(f,v->value.shared_val);
+                v->value.shared_val = NULL;
                 break;
             default: break;
             }
         }
     }
     v->type = PURE_INVALID;
+    v->value.shared_val = NULL;
 }
 
 static
@@ -1874,7 +1888,6 @@ int ctrl_foreach_map( struct pure* f , char k_var[PURE_MAX_VARNAME] , char v_var
     int exec= 0;
 
     pure_value_invalid(&pv_name);
-    sv = malloc_shared_value(f);
     *brk = *ret_back = 0;
 
     while( symbol_table_iter_has_next(a,cursor) ) {
@@ -1883,10 +1896,10 @@ int ctrl_foreach_map( struct pure* f , char k_var[PURE_MAX_VARNAME] , char v_var
             cursor = symbol_table_iter_deref(a,cursor,cast(void**,&v),&n);
             continue;
         }
-
         exec = 1;
-
         set_pc(f,pc);
+        sv = malloc_shared_value(f);
+
         /* populate the shared value , since the map returns the const char*, we
          * need a pure_value object for adaption here */
         sv->value.str.sz = strlen(n);
@@ -1913,6 +1926,8 @@ int ctrl_foreach_map( struct pure* f , char k_var[PURE_MAX_VARNAME] , char v_var
             unref_val(f,v);
             return 0;
         }
+        unref_val(f,&pv_name);
+        unref_val(f,v);
         /* move forward the cursor */
         cursor = symbol_table_iter_deref(a,cursor,cast(void**,&v),&n);
     }
@@ -2809,6 +2824,10 @@ int lib_type( struct pure* p , struct pure_value* par , size_t sz ,
         sv->value.str.c_str = to_str("number",sv->buf,&(sv->value.str.sz));
         pure_value_str(result,sv);
         return 0;
+    case PURE_STRING:
+        sv->value.str.c_str = to_str("string",sv->buf,&(sv->value.str.sz));
+        pure_value_str(result,sv);
+        return 0;
     case PURE_NIL:
         sv->value.str.c_str = to_str("nil",sv->buf,&(sv->value.str.sz));
         pure_value_str(result,sv);
@@ -3331,48 +3350,89 @@ int pure_map_iter_deref( const struct pure_map* map , int cursor , const char** 
 #ifdef UTEST
 /* 1 symbol_table test */
 void test_symbol_table() {
-    struct symbol_table tb;
-    int insert;
-    double* ptr;
 
-    symbol_table_create(&tb,2,sizeof(double));
-    assert(tb.cap == 2);
-    assert(tb.mem_sz == sizeof(double));
-    assert(tb.sz == 0);
+    {
+        struct symbol_table tb;
+        int insert;
+        double* ptr;
 
-    ptr = symbol_table_insert(&tb,"a",&insert);
-    assert(ptr);
-    assert(insert);
-    *ptr = 1;
+        symbol_table_create(&tb,2,sizeof(double));
+        assert(tb.cap == 2);
+        assert(tb.mem_sz == sizeof(double));
+        assert(tb.sz == 0);
 
-    ptr = symbol_table_insert(&tb,"b",&insert);
-    assert(ptr);
-    assert(insert);
-    *ptr = 2;
+        ptr = symbol_table_insert(&tb,"a",&insert);
+        assert(ptr);
+        assert(insert);
+        *ptr = 1;
 
-    ptr = symbol_table_query(&tb,"a");
-    assert(ptr != NULL);
-    assert(*cast(double*,ptr) == 1);
+        ptr = symbol_table_insert(&tb,"b",&insert);
+        assert(ptr);
+        assert(insert);
+        *ptr = 2;
 
-    ptr = symbol_table_query(&tb,"b");
-    assert(ptr != NULL);
-    assert(*cast(double*,ptr) == 2);
+        ptr = symbol_table_query(&tb,"a");
+        assert(ptr != NULL);
+        assert(*cast(double*,ptr) == 1);
 
-    assert(tb.sz == 2);
-    assert(tb.cap == 2);
+        ptr = symbol_table_query(&tb,"b");
+        assert(ptr != NULL);
+        assert(*cast(double*,ptr) == 2);
 
-    /* trigger rehash */
-    ptr = symbol_table_insert(&tb,"c",&insert);
-    assert(ptr);
-    assert(insert);
-    *cast(double*,ptr) = 3;
+        assert(tb.sz == 2);
+        assert(tb.cap == 2);
 
-    assert(tb.cap ==4);
-    assert(tb.sz == 3);
+        /* trigger rehash */
+        ptr = symbol_table_insert(&tb,"c",&insert);
+        assert(ptr);
+        assert(insert);
+        *cast(double*,ptr) = 3;
 
-    ptr = symbol_table_query(&tb,"c");
-    assert(ptr);
-    assert( *cast(double*,ptr) == 3 );
+        assert(tb.cap ==4);
+        assert(tb.sz == 3);
+
+        ptr = symbol_table_query(&tb,"c");
+        assert(ptr);
+        assert( *cast(double*,ptr) == 3 );
+
+    }
+
+    {
+        struct symbol_table tb;
+        int insert;
+        double* ptr;
+        const char* n;
+        void* data;
+        int cursor;
+
+        symbol_table_create(&tb,12,56);
+        assert(tb.cap == 12);
+        assert(tb.mem_sz == 56);
+        assert(tb.sz == 0);
+
+#define DO(x,v) \
+    do { \
+        ptr = symbol_table_insert(&tb,x,&insert); \
+        assert(ptr); \
+        assert(insert); \
+        *ptr = (v); \
+    } while(0)
+
+        DO("A",1);
+        DO("B",2);
+        DO("C",3);
+        DO("D",4);
+        DO("E",5);
+        DO("SEDASD",6);
+
+
+        cursor = symbol_table_iter_start(&tb,&data,&n);
+        while( symbol_table_iter_has_next(&tb,cursor) ) {
+            printf("%s:%f\n",n,*cast(double*,data));
+            cursor = symbol_table_iter_deref(&tb,cursor,&data,&n);
+        }
+        
+    }
 }
 
 /* 2. pure value test */
@@ -3908,7 +3968,7 @@ int main() {
     test_array_foreach();
     test_map_foreach();
     test_1();
-    test_2(); 
+    test_2();
     printf("-------------------------Unit test finish!--------------------\n");
     return 0;
 }
