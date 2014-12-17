@@ -2615,17 +2615,17 @@ int dev_block_single( struct pure* f , struct pure_user_func* ufunc , int x , in
             break;
 
         case TK_ELSE:
-            tk = IN_COND;
+            state = IN_COND;
             tk = next_tk(f,4);
             break;
 
         case TK_ELIF:
-            tk = IN_COND;
+            state = IN_COND;
             tk = next_tk(f,4);
             break;
 
         case TK_LOOP:
-            tk = IN_LOOP;
+            state = IN_LOOP;
             tk = next_tk(f,4);
             break;
 
