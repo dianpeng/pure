@@ -2523,6 +2523,7 @@ int dev_block_single( struct pure* f , struct pure_user_func* ufunc , int x , in
     double num;
     int tk;
     int state = NO_JMP;
+    int in_map_sz = 0;
 
     if( x+1 == PURE_MAX_NESTED_BLOCK ) {
         f->ec = PURE_EC_TOO_MANY_NESTED_BLOCK;
@@ -2569,19 +2570,23 @@ int dev_block_single( struct pure* f , struct pure_user_func* ufunc , int x , in
             tk = next_tk(f,offset);
             break;
         case TK_LBRA:
-            if( state != NO_JMP ) {
+            switch(state) {
+            case NO_JMP:
+                state = IN_MAP;
+            case IN_MAP:
+                ++in_map_sz;
+                tk = next_tk(f,1);
+                break;
+            default:
                 /* now let's recursively calls into ourself */
                 if( dev_block_single(f,ufunc,cur_x,cur_y) !=0 )
                     return -1;
                 ++cur_y;
                 tk = f->tk;
                 state = NO_JMP;
-            } else {
-                state = IN_MAP;
-                tk = next_tk(f,1);
+                break;
             }
             break;
-
         case TK_RBRA:
             switch(state) {
             case NO_JMP:
@@ -2590,7 +2595,10 @@ int dev_block_single( struct pure* f , struct pure_user_func* ufunc , int x , in
                 assert(cur_x == x);
                 break;
             case IN_MAP:
-                state = NO_JMP;
+                assert(in_map_sz !=0);
+                --in_map_sz;
+                if( in_map_sz == 0 )
+                    state = NO_JMP;
                 tk = next_tk(f,1);
                 break;
             default: assert(0); break;
