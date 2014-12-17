@@ -729,7 +729,8 @@ int next_tk( struct pure* f , int offset ) {
         case '#': ret = until(f,'\n',f->loc)+1; 
             if(ret == -1) return TK_EOF;
             else { f->loc += ret; break; }
-        case ' ': case '\t': case '\r':  case '\n':
+        case ' ': case '\t': case '\r':  
+        case '\n': case '\f': case '\v': /* white space */
             f->loc = skip(f,f->data[f->loc],f->loc); break;
         case '0':case '1':case '2':case '3':case '4':
         case '5':case '6':case '7':case '8':case '9':
@@ -2907,6 +2908,24 @@ int lib_type( struct pure* p , struct pure_value* par , size_t sz ,
     }
 }
 
+/* The map size needs to be fixed since NIL is not counted as the 
+ * element inside of the map object */
+static
+int map_size( struct symbol_table* t ) {
+    struct pure_value* data;
+    const char* name;
+    int cursor = symbol_table_iter_start(t,cast(void**,&data),&name);
+    int len = 0;
+
+    while( symbol_table_iter_has_next(t,cursor) ) {
+        if ( data->type != PURE_NIL ) {
+            ++len;
+        }
+        cursor = symbol_table_iter_deref(t,cursor,cast(void**,&data),&name);
+    }
+    return len;
+}
+
 static
 int lib_size( struct pure* p , struct pure_value* par , size_t sz ,
               struct pure_value* result, void* ptr ) {
@@ -2917,7 +2936,7 @@ int lib_size( struct pure* p , struct pure_value* par , size_t sz ,
         pure_value_number(result,shared_value(par)->value.arr.sz);
         return 0;
     case PURE_MAP:
-        pure_value_number(result,shared_value(par)->value.map.sz);
+        pure_value_number(result,map_size(&(shared_value(par)->value.map)));
         return 0;
     case PURE_NUMBER:
     case PURE_NIL:
@@ -3051,7 +3070,10 @@ int lib_print( struct pure* p , struct pure_value* par , size_t sz ,
     for( i = 0 ; i < sz ; ++i ) {
         switch(par[i].type) {
         case PURE_NUMBER:
-            printf("%.6f",par[i].value.num);
+            if( is_int(par[i].value.num) )
+                printf("%.0f",par[i].value.num);
+            else
+                printf("%.6f",par[i].value.num);
             break;
         case PURE_STRING:
             printf("%s",shared_value(par+i)->value.str.c_str);
@@ -3072,7 +3094,6 @@ int lib_print( struct pure* p , struct pure_value* par , size_t sz ,
             break;
         }
     }
-    printf("\n");
     return 0;
 }
 

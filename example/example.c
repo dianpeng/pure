@@ -128,7 +128,7 @@ int run_example4() {
 }
 
 int main() {
-    printf("From host program!");
+    printf("From host program!\n");
     run_example123();
     return 0;
 }

@@ -88,9 +88,6 @@ void pure_value_new_user_data( struct pure* , void* udata , pure_user_data_clean
 void pure_value_ref( struct pure* , struct pure_value* , const struct pure_value* );
 void pure_value_unref( struct pure* , struct pure_value* );
 
-/* Deep copy of the value */
-void pure_value_copy( struct pure* , struct pure_value* cp );
-
 /* Pure value getter */
 static
 int pure_value_get_num( const struct pure_value* val , double* num ) {
