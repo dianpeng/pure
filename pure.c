@@ -979,8 +979,10 @@ int invoke_user_func( struct pure* f , struct pure_user_func* ufunc , const stru
     assert(f->cur_result->cur_stk !=0);
     --(f->cur_result->cur_stk);
 
-    /* Move back PC to the callee */
-    set_pc(f,pc);
+    if( ret == 0 ) {
+        /* Move back PC to the callee */
+        set_pc(f,pc);
+    }
     f->cur_result->cur_ufunc = prev_func;
     return ret;
 }
@@ -2502,6 +2504,14 @@ void skip_seq_block( struct pure* f , int yidx ) {
     assert(f->loc !=0);
 }
 
+enum {
+    NO_JMP,
+    IN_MAP,
+    IN_FOR,
+    IN_LOOP,
+    IN_COND
+};
+
 static
 int dev_block_single( struct pure* f , struct pure_user_func* ufunc , int x , int y ) {
     int cur_x = x+1;
@@ -2512,6 +2522,7 @@ int dev_block_single( struct pure* f , struct pure_user_func* ufunc , int x , in
     int offset;
     double num;
     int tk;
+    int state = NO_JMP;
 
     if( x+1 == PURE_MAX_NESTED_BLOCK ) {
         f->ec = PURE_EC_TOO_MANY_NESTED_BLOCK;
@@ -2558,16 +2569,58 @@ int dev_block_single( struct pure* f , struct pure_user_func* ufunc , int x , in
             tk = next_tk(f,offset);
             break;
         case TK_LBRA:
-            /* now let's recursively calls into ourself */
-            if( dev_block_single(f,ufunc,cur_x,cur_y) !=0 )
-                return -1;
-            ++cur_y;
-            tk = f->tk;
+            if( state != NO_JMP ) {
+                /* now let's recursively calls into ourself */
+                if( dev_block_single(f,ufunc,cur_x,cur_y) !=0 )
+                    return -1;
+                ++cur_y;
+                tk = f->tk;
+                state = NO_JMP;
+            } else {
+                state = IN_MAP;
+                tk = next_tk(f,1);
+            }
             break;
+
         case TK_RBRA:
-            --cur_x;
-            assert( cur_x == x );
+            switch(state) {
+            case NO_JMP:
+                /* We should break from the current loop since we are done here */
+                --cur_x;
+                assert(cur_x == x);
+                break;
+            case IN_MAP:
+                state = NO_JMP;
+                tk = next_tk(f,1);
+                break;
+            default: assert(0); break;
+            }
             break;
+        case TK_FOR:
+            state = IN_FOR;
+            tk = next_tk(f,3);
+            break;
+
+        case TK_IF:
+            state = IN_COND;
+            tk = next_tk(f,2);
+            break;
+
+        case TK_ELSE:
+            tk = IN_COND;
+            tk = next_tk(f,4);
+            break;
+
+        case TK_ELIF:
+            tk = IN_COND;
+            tk = next_tk(f,4);
+            break;
+
+        case TK_LOOP:
+            tk = IN_LOOP;
+            tk = next_tk(f,4);
+            break;
+
 #define DO(t,o) \
         case t: \
         tk = next_tk(f,o); \
@@ -2594,11 +2647,6 @@ int dev_block_single( struct pure* f , struct pure_user_func* ufunc , int x , in
             DO(TK_NIL,3);
             DO(TK_BREAK,5);
             DO(TK_COMMA,1);
-            DO(TK_IF,2);
-            DO(TK_ELIF,4);
-            DO(TK_ELSE,4);
-            DO(TK_FOR,3);
-            DO(TK_LOOP,4);
             DO(TK_RET,6);
             DO(TK_FUNC,4);
             DO(TK_ASSIGN,1);
